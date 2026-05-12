@@ -32,6 +32,7 @@ Design:
 from __future__ import annotations
 
 import concurrent.futures as cf
+import atexit
 import csv
 import hashlib
 import json
@@ -40,6 +41,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -145,6 +147,8 @@ REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES = 0.5
 
 MAX_RETRIES = 5
 TIMEOUT_SECONDS = 90
+HTTP_POOL_CONNECTIONS = WORKERS * 2
+HTTP_POOL_MAXSIZE = WORKERS * 2
 
 # Set for testing, e.g. 2_000. Use None for all records per species.
 MAX_RECORDS_PER_SPECIES: int | None = None
@@ -346,6 +350,11 @@ class SpeciesResult:
     pages_written: int
     rows_written: int
     species_parquet_path: Path
+
+
+_SESSION_LOCAL = threading.local()
+_SESSION_REGISTRY_LOCK = threading.Lock()
+_SESSION_REGISTRY: list[requests.Session] = []
 
 
 # =============================================================================
@@ -733,34 +742,74 @@ def prepare_species_output_for_config(target: SpeciesTarget) -> tuple[dict[str, 
 # API FETCHING
 # =============================================================================
 
+def create_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=HTTP_POOL_CONNECTIONS,
+        pool_maxsize=HTTP_POOL_MAXSIZE,
+        max_retries=0,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+def get_thread_session() -> requests.Session:
+    session = getattr(_SESSION_LOCAL, "session", None)
+
+    if isinstance(session, requests.Session):
+        return session
+
+    session = create_session()
+    _SESSION_LOCAL.session = session
+
+    with _SESSION_REGISTRY_LOCK:
+        _SESSION_REGISTRY.append(session)
+
+    return session
+
+
+def close_all_sessions() -> None:
+    with _SESSION_REGISTRY_LOCK:
+        sessions = list(_SESSION_REGISTRY)
+        _SESSION_REGISTRY.clear()
+
+    for session in sessions:
+        session.close()
+
+
+atexit.register(close_all_sessions)
+
+
 def fetch_json(target: SpeciesTarget, start: int, page_size: int) -> dict[str, Any]:
     params = build_params(target=target, start=start, page_size=page_size)
     last_error: Exception | None = None
+    session = get_thread_session()
 
-    with requests.Session() as session:
-        session.headers.update({"User-Agent": USER_AGENT})
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = session.get(API_URL, params=params, timeout=TIMEOUT_SECONDS)
 
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                response = session.get(API_URL, params=params, timeout=TIMEOUT_SECONDS)
-
-                if response.status_code == 429:
-                    wait = min(120, 10 * attempt)
-                    log(f"HTTP 429 for species={target.key}, start={start}. Sleeping {wait}s.")
-                    time.sleep(wait)
-                    continue
-
-                response.raise_for_status()
-                return response.json()
-
-            except Exception as exc:
-                last_error = exc
-                wait = min(120, 2**attempt)
-                log(
-                    f"Fetch failed: species={target.key}, start={start}, "
-                    f"attempt={attempt}/{MAX_RETRIES}, error={exc}. Retrying in {wait}s."
-                )
+            if response.status_code == 429:
+                wait = min(120, 10 * attempt)
+                log(f"HTTP 429 for species={target.key}, start={start}. Sleeping {wait}s.")
+                response.close()
                 time.sleep(wait)
+                continue
+
+            response.raise_for_status()
+            return response.json()
+
+        except Exception as exc:
+            last_error = exc
+            wait = min(120, 2**attempt)
+            log(
+                f"Fetch failed: species={target.key}, start={start}, "
+                f"attempt={attempt}/{MAX_RETRIES}, error={exc}. Retrying in {wait}s."
+            )
+            time.sleep(wait)
 
     raise RuntimeError(
         f"Failed species={target.key}, start={start} after {MAX_RETRIES} retries: {last_error}"
