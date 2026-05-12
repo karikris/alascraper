@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import csv
+import hashlib
 import json
 import math
 import os
@@ -175,6 +176,8 @@ USER_AGENT = (
     "Monash-Australian-butterfly-occurrence-research/0.3 "
     "(contact: replace-with-your-email@monash.edu)"
 )
+
+RUN_CONFIG_VERSION = 1
 
 # -------------------------------------------------------------------------
 # Fields retained in the analysis table.
@@ -332,6 +335,7 @@ class SpeciesResult:
     scientific_name: str
     common_name: str | None
     taxon_lsid: str | None
+    config_fingerprint: str
     reported_total_records: int
     pages_written: int
     rows_written: int
@@ -358,6 +362,10 @@ def shard_dir(target: SpeciesTarget) -> Path:
 
 def raw_json_dir(target: SpeciesTarget) -> Path:
     return species_dir(target) / "raw_pages"
+
+
+def species_metadata_path(target: SpeciesTarget) -> Path:
+    return species_dir(target) / "run_metadata.json"
 
 
 def shard_path(target: SpeciesTarget, page_index: int) -> Path:
@@ -601,6 +609,115 @@ def build_params(target: SpeciesTarget, start: int, page_size: int) -> list[tupl
         params.append(("fq", fq))
 
     return params
+
+
+# =============================================================================
+# RESUME FINGERPRINTING
+# =============================================================================
+
+def script_sha256() -> str | None:
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def schema_signature() -> list[dict[str, str]]:
+    return [
+        {
+            "name": field,
+            "dtype": str(SCHEMA[field]),
+        }
+        for field in FIELDS
+    ]
+
+
+def species_run_config(target: SpeciesTarget) -> dict[str, Any]:
+    return {
+        "run_config_version": RUN_CONFIG_VERSION,
+        "script_sha256": script_sha256(),
+        "api_url": API_URL,
+        "quality_profile": QUALITY_PROFILE,
+        "quality_control": QUALITY_CONTROL,
+        "start_param_name": START_PARAM_NAME,
+        "country_filter_enabled": COUNTRY_FILTER_ENABLED,
+        "country_filter": COUNTRY_FILTER,
+        "exact_taxon_name_filter_when_no_lsid": EXACT_TAXON_NAME_FILTER_WHEN_NO_LSID,
+        "exact_taxon_name_filter_when_lsid_supplied": EXACT_TAXON_NAME_FILTER_WHEN_LSID_SUPPLIED,
+        "query": build_query(target),
+        "fq_filters": build_fq_filters(target),
+        "page_size": PAGE_SIZE,
+        "max_records_per_species": MAX_RECORDS_PER_SPECIES,
+        "include_user_data_fields": INCLUDE_USER_DATA_FIELDS,
+        "write_raw_page_json": WRITE_RAW_PAGE_JSON,
+        "fields": FIELDS,
+        "schema": schema_signature(),
+        "species_target": {
+            "key": target.key,
+            "scientific_name": target.scientific_name,
+            "common_name": target.common_name,
+            "taxon_lsid": target.taxon_lsid,
+        },
+    }
+
+
+def config_fingerprint(config: dict[str, Any]) -> str:
+    payload = json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def read_species_metadata(target: SpeciesTarget) -> dict[str, Any] | None:
+    path = species_metadata_path(target)
+
+    if not path.exists():
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def write_species_metadata(target: SpeciesTarget, config: dict[str, Any], fingerprint: str) -> None:
+    path = species_metadata_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "created_utc": utc_now(),
+                "config_fingerprint": fingerprint,
+                "config": config,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def prepare_species_output_for_config(target: SpeciesTarget) -> tuple[dict[str, Any], str]:
+    config = species_run_config(target)
+    fingerprint = config_fingerprint(config)
+    existing_metadata = read_species_metadata(target)
+    existing_fingerprint = (
+        existing_metadata.get("config_fingerprint")
+        if isinstance(existing_metadata, dict)
+        else None
+    )
+    output_dir = species_dir(target)
+
+    if output_dir.exists() and existing_fingerprint != fingerprint:
+        reason = "missing" if existing_fingerprint is None else "mismatched"
+        log(
+            f"Species={target.key}: clearing stale output directory "
+            f"because run metadata is {reason}."
+        )
+        shutil.rmtree(output_dir)
+
+    write_species_metadata(target, config, fingerprint)
+    return config, fingerprint
 
 
 # =============================================================================
@@ -909,6 +1026,7 @@ def write_manifest(species_results: list[SpeciesResult]) -> None:
                 "scientific_name",
                 "common_name",
                 "taxon_lsid",
+                "config_fingerprint",
                 "query",
                 "fq_filters",
                 "reported_total_records",
@@ -930,6 +1048,7 @@ def write_manifest(species_results: list[SpeciesResult]) -> None:
                     "scientific_name": result.scientific_name,
                     "common_name": result.common_name or "",
                     "taxon_lsid": result.taxon_lsid or "",
+                    "config_fingerprint": result.config_fingerprint,
                     "query": build_query(target),
                     "fq_filters": " | ".join(build_fq_filters(target)),
                     "reported_total_records": result.reported_total_records,
@@ -968,6 +1087,8 @@ def validate_privacy_settings() -> None:
 def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
     log("=" * 80)
     log(f"Starting species={target.key} | scientific_name={target.scientific_name}")
+    _, fingerprint = prepare_species_output_for_config(target)
+    log(f"Species={target.key}: config fingerprint={fingerprint}")
 
     if target.taxon_lsid:
         log(f"Using LSID query: {target.taxon_lsid}")
@@ -989,6 +1110,7 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
             scientific_name=target.scientific_name,
             common_name=target.common_name,
             taxon_lsid=target.taxon_lsid,
+            config_fingerprint=fingerprint,
             reported_total_records=0,
             pages_written=0,
             rows_written=0,
@@ -1011,6 +1133,7 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
         scientific_name=target.scientific_name,
         common_name=target.common_name,
         taxon_lsid=target.taxon_lsid,
+        config_fingerprint=fingerprint,
         reported_total_records=total_records,
         pages_written=len(page_results),
         rows_written=rows_written,
