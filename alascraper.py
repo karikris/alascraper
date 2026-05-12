@@ -150,6 +150,11 @@ WRITE_CSV = False
 WRITE_DUCKDB_DATABASE = True
 WRITE_RAW_PAGE_JSON = False
 
+# Privacy/data-minimisation default:
+# keep False unless ethics approval explicitly covers observer names, source
+# observation links, and user-submitted media identifiers/URLs.
+INCLUDE_USER_DATA_FIELDS = False
+
 # If True, delete all previous outputs.
 # If False, existing shard files are reused.
 FRESH_RUN = False
@@ -172,16 +177,18 @@ USER_AGENT = (
 )
 
 # -------------------------------------------------------------------------
-# Fields retained in the analysis table
+# Fields retained in the analysis table.
+#
+# By default, omit fields that can expose observer/user data or link back to
+# source observations/media. `uuid` remains as the ALA record identifier.
 # -------------------------------------------------------------------------
 
-FIELDS = [
+BASE_FIELDS = [
     "query_species_key",
     "query_scientific_name",
     "query_common_name",
     "query_taxon_lsid",
     "uuid",
-    "occurrenceID",
     "scientificName",
     "raw_scientificName",
     "vernacularName",
@@ -212,10 +219,19 @@ FIELDS = [
     "dataProviderName",
     "dataResourceUid",
     "dataResourceName",
+    "license",
+    "identificationVerificationStatus",
+    "recordNumber",
+    "assertions",
+    "speciesGroups",
+    "latLong",
+]
+
+USER_DATA_FIELDS = [
+    "occurrenceID",
     "recordedBy",
     "collectors",
     "collector",
-    "license",
     "image",
     "images",
     "imageUrl",
@@ -225,14 +241,11 @@ FIELDS = [
     "imageUrls",
     "references",
     "occurrenceDetails",
-    "identificationVerificationStatus",
-    "recordNumber",
-    "assertions",
-    "speciesGroups",
-    "latLong",
 ]
 
-SCHEMA: dict[str, pl.DataType] = {
+FIELDS = BASE_FIELDS + (USER_DATA_FIELDS if INCLUDE_USER_DATA_FIELDS else [])
+
+FIELD_SCHEMA: dict[str, pl.DataType] = {
     "query_species_key": pl.Utf8,
     "query_scientific_name": pl.Utf8,
     "query_common_name": pl.Utf8,
@@ -288,6 +301,8 @@ SCHEMA: dict[str, pl.DataType] = {
     "speciesGroups": pl.Utf8,
     "latLong": pl.Utf8,
 }
+
+SCHEMA: dict[str, pl.DataType] = {field: FIELD_SCHEMA[field] for field in FIELDS}
 
 
 # =============================================================================
@@ -942,6 +957,14 @@ def prepare_output_dirs() -> None:
         RUN_LOG_PATH.write_text("", encoding="utf-8")
 
 
+def validate_privacy_settings() -> None:
+    if WRITE_RAW_PAGE_JSON and not INCLUDE_USER_DATA_FIELDS:
+        raise ValueError(
+            "WRITE_RAW_PAGE_JSON=True would store raw observer/source/media fields. "
+            "Set INCLUDE_USER_DATA_FIELDS=True only when ethics approval covers it."
+        )
+
+
 def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
     log("=" * 80)
     log(f"Starting species={target.key} | scientific_name={target.scientific_name}")
@@ -996,6 +1019,7 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
 
 
 def main() -> int:
+    validate_privacy_settings()
     prepare_output_dirs()
 
     log("Starting ALA species-by-species occurrence fetch.")
@@ -1004,6 +1028,7 @@ def main() -> int:
     log(f"Workers: {WORKERS}")
     log(f"Page size: {PAGE_SIZE}")
     log(f"CSV output enabled: {WRITE_CSV}")
+    log(f"User-data fields enabled: {INCLUDE_USER_DATA_FIELDS}")
 
     species_results: list[SpeciesResult] = []
 
