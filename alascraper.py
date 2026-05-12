@@ -126,6 +126,12 @@ EXACT_TAXON_NAME_FILTER_WHEN_NO_LSID = False
 # This can be stricter but may exclude records if ALA normalises names differently.
 EXACT_TAXON_NAME_FILTER_WHEN_LSID_SUPPLIED = False
 
+# Avoid relevance-score pagination for bulk export. `uuid` is not accepted as an
+# ALA sort field, so use eventDate and remove duplicate UUIDs during merge.
+ALA_SORT_FIELD = "eventDate"
+ALA_SORT_DIRECTION = "asc"
+DEDUPE_BY_UUID = True
+
 # -------------------------------------------------------------------------
 # Performance controls
 # -------------------------------------------------------------------------
@@ -600,8 +606,8 @@ def build_params(target: SpeciesTarget, start: int, page_size: int) -> list[tupl
         ("qc", QUALITY_CONTROL),
         (START_PARAM_NAME, start),
         ("pageSize", page_size),
-        ("sort", "score"),
-        ("dir", "asc"),
+        ("sort", ALA_SORT_FIELD),
+        ("dir", ALA_SORT_DIRECTION),
         ("facet", "false"),
     ]
 
@@ -644,6 +650,9 @@ def species_run_config(target: SpeciesTarget) -> dict[str, Any]:
         "country_filter": COUNTRY_FILTER,
         "exact_taxon_name_filter_when_no_lsid": EXACT_TAXON_NAME_FILTER_WHEN_NO_LSID,
         "exact_taxon_name_filter_when_lsid_supplied": EXACT_TAXON_NAME_FILTER_WHEN_LSID_SUPPLIED,
+        "ala_sort_field": ALA_SORT_FIELD,
+        "ala_sort_direction": ALA_SORT_DIRECTION,
+        "dedupe_by_uuid": DEDUPE_BY_UUID,
         "query": build_query(target),
         "fq_filters": build_fq_filters(target),
         "page_size": PAGE_SIZE,
@@ -896,12 +905,50 @@ def run_parallel_fetch_for_species(target: SpeciesTarget, tasks: list[PageTask])
 # DUCKDB FINALISATION
 # =============================================================================
 
+def sql_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def sql_ident(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def field_select_list(table_alias: str | None = None) -> str:
+    prefix = f"{sql_ident(table_alias)}." if table_alias else ""
+    return ", ".join(f"{prefix}{sql_ident(field)}" for field in FIELDS)
+
+
+def deduped_select_sql(source_sql: str) -> str:
+    if not DEDUPE_BY_UUID:
+        return f"SELECT {field_select_list()} FROM {source_sql}"
+
+    return f"""
+        SELECT {field_select_list("deduped")}
+        FROM (
+            SELECT
+                {field_select_list("source")},
+                ROW_NUMBER() OVER (
+                    PARTITION BY {sql_ident("source")}.{sql_ident("uuid")}
+                    ORDER BY
+                        {sql_ident("source")}.{sql_ident("eventDate")} NULLS LAST,
+                        {sql_ident("source")}.{sql_ident("query_species_key")},
+                        {sql_ident("source")}.{sql_ident("uuid")}
+                ) AS {sql_ident("_uuid_rank")}
+            FROM {source_sql} AS {sql_ident("source")}
+        ) AS {sql_ident("deduped")}
+        WHERE {sql_ident("deduped")}.{sql_ident("uuid")} IS NULL
+           OR {sql_ident("deduped")}.{sql_ident("_uuid_rank")} = 1
+    """
+
+
 def merge_species_shards(target: SpeciesTarget) -> Path:
     species_output = species_parquet_path(target)
     species_output.parent.mkdir(parents=True, exist_ok=True)
 
     shard_glob = str(shard_dir(target) / "*.parquet").replace("\\", "/")
     output_path = str(species_output).replace("\\", "/")
+    source_sql = f"read_parquet({sql_string(shard_glob)})"
+    select_sql = deduped_select_sql(source_sql)
 
     con = duckdb.connect(":memory:")
 
@@ -910,14 +957,22 @@ def merge_species_shards(target: SpeciesTarget) -> Path:
         con.execute(f"PRAGMA threads={threads}")
 
         species_output.unlink(missing_ok=True)
+        input_rows = con.execute(f"SELECT COUNT(*) FROM {source_sql}").fetchone()[0]
+        output_rows = con.execute(f"SELECT COUNT(*) FROM ({select_sql})").fetchone()[0]
+
+        if DEDUPE_BY_UUID:
+            dropped_rows = input_rows - output_rows
+            log(
+                f"Species={target.key}: UUID dedupe kept {output_rows:,}/{input_rows:,} "
+                f"rows; dropped={dropped_rows:,}"
+            )
 
         con.execute(
             f"""
             COPY (
-                SELECT *
-                FROM read_parquet('{shard_glob}')
+                {select_sql}
             )
-            TO '{output_path}'
+            TO {sql_string(output_path)}
             (
                 FORMAT parquet,
                 COMPRESSION '{PARQUET_COMPRESSION}',
@@ -956,17 +1011,27 @@ def merge_all_species(species_results: list[SpeciesResult]) -> None:
         con.execute("DROP VIEW IF EXISTS ala_species_records")
 
         file_list_sql = "[" + ",".join("'" + f.replace("'", "''") + "'" for f in species_files) + "]"
+        source_sql = f"read_parquet({file_list_sql})"
+        select_sql = deduped_select_sql(source_sql)
+        input_rows = con.execute(f"SELECT COUNT(*) FROM {source_sql}").fetchone()[0]
+        output_rows = con.execute(f"SELECT COUNT(*) FROM ({select_sql})").fetchone()[0]
 
         con.execute(
             f"""
             CREATE VIEW ala_species_records AS
-            SELECT *
-            FROM read_parquet({file_list_sql})
+            {select_sql}
             """
         )
 
         row_count = con.execute("SELECT COUNT(*) FROM ala_species_records").fetchone()[0]
         log(f"DuckDB sees {row_count:,} all-species rows.")
+
+        if DEDUPE_BY_UUID:
+            dropped_rows = input_rows - output_rows
+            log(
+                f"All-species UUID dedupe kept {output_rows:,}/{input_rows:,} "
+                f"rows; dropped={dropped_rows:,}"
+            )
 
         final_parquet = str(FINAL_ALL_SPECIES_PARQUET).replace("\\", "/")
         FINAL_ALL_SPECIES_PARQUET.unlink(missing_ok=True)
@@ -977,7 +1042,7 @@ def merge_all_species(species_results: list[SpeciesResult]) -> None:
                 SELECT *
                 FROM ala_species_records
             )
-            TO '{final_parquet}'
+            TO {sql_string(final_parquet)}
             (
                 FORMAT parquet,
                 COMPRESSION '{PARQUET_COMPRESSION}',
@@ -997,7 +1062,7 @@ def merge_all_species(species_results: list[SpeciesResult]) -> None:
                     SELECT *
                     FROM ala_species_records
                 )
-                TO '{final_csv}'
+                TO {sql_string(final_csv)}
                 (
                     HEADER,
                     DELIMITER ','
