@@ -349,6 +349,7 @@ class SpeciesResult:
     reported_total_records: int
     pages_written: int
     rows_written: int
+    elapsed_seconds: float
     species_parquet_path: Path
 
 
@@ -409,6 +410,19 @@ def log(message: str) -> None:
     print(line, flush=True)
     with RUN_LOG_PATH.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+
+
+def format_duration(seconds: float) -> str:
+    minutes, remainder = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+
+    if hours:
+        return f"{int(hours)}h {int(minutes)}m {remainder:.1f}s"
+
+    if minutes:
+        return f"{int(minutes)}m {remainder:.1f}s"
+
+    return f"{remainder:.1f}s"
 
 
 # =============================================================================
@@ -1146,6 +1160,8 @@ def write_manifest(species_results: list[SpeciesResult]) -> None:
                 "reported_total_records",
                 "pages_written",
                 "rows_written",
+                "elapsed_seconds",
+                "elapsed_human",
                 "species_parquet_path",
             ],
         )
@@ -1168,6 +1184,8 @@ def write_manifest(species_results: list[SpeciesResult]) -> None:
                     "reported_total_records": result.reported_total_records,
                     "pages_written": result.pages_written,
                     "rows_written": result.rows_written,
+                    "elapsed_seconds": f"{result.elapsed_seconds:.3f}",
+                    "elapsed_human": format_duration(result.elapsed_seconds),
                     "species_parquet_path": str(result.species_parquet_path),
                 }
             )
@@ -1199,6 +1217,7 @@ def validate_privacy_settings() -> None:
 
 
 def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
+    species_started = time.perf_counter()
     log("=" * 80)
     log(f"Starting species={target.key} | scientific_name={target.scientific_name}")
     _, fingerprint = prepare_species_output_for_config(target)
@@ -1219,6 +1238,11 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
         empty_path = species_parquet_path(target)
         empty_path.parent.mkdir(parents=True, exist_ok=True)
         pl.DataFrame([], schema=SCHEMA).write_parquet(empty_path)
+        elapsed_seconds = time.perf_counter() - species_started
+        log(
+            f"Species={target.key}: complete in {format_duration(elapsed_seconds)}; "
+            "rows_written=0"
+        )
         return SpeciesResult(
             species_key=target.key,
             scientific_name=target.scientific_name,
@@ -1228,6 +1252,7 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
             reported_total_records=0,
             pages_written=0,
             rows_written=0,
+            elapsed_seconds=elapsed_seconds,
             species_parquet_path=empty_path,
         )
 
@@ -1241,6 +1266,11 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
 
     merged_path = merge_species_shards(target)
     log(f"Species={target.key}: wrote species Parquet={merged_path}")
+    elapsed_seconds = time.perf_counter() - species_started
+    log(
+        f"Species={target.key}: complete in {format_duration(elapsed_seconds)}; "
+        f"rows_written={rows_written:,}; pages_written={len(page_results):,}"
+    )
 
     return SpeciesResult(
         species_key=target.key,
@@ -1251,11 +1281,13 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
         reported_total_records=total_records,
         pages_written=len(page_results),
         rows_written=rows_written,
+        elapsed_seconds=elapsed_seconds,
         species_parquet_path=merged_path,
     )
 
 
 def main() -> int:
+    run_started = time.perf_counter()
     validate_privacy_settings()
     prepare_output_dirs()
 
@@ -1277,7 +1309,12 @@ def main() -> int:
     write_manifest(species_results)
     merge_all_species(species_results)
 
-    log("Complete.")
+    total_elapsed_seconds = time.perf_counter() - run_started
+    total_rows = sum(result.rows_written for result in species_results)
+    log(
+        f"Complete in {format_duration(total_elapsed_seconds)}; "
+        f"species={len(species_results):,}; shard_rows_written={total_rows:,}"
+    )
     return 0
 
 
