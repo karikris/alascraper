@@ -116,9 +116,10 @@ START_PARAM_NAME = "start"
 COUNTRY_FILTER_ENABLED = True
 COUNTRY_FILTER = 'country:"Australia"'
 
-# For species-by-species queries, this exact processed-name filter helps avoid
-# accidental broad full-text matches when taxon_lsid is missing.
-EXACT_TAXON_NAME_FILTER_WHEN_NO_LSID = True
+# ALA can normalise accepted names differently from common field-guide names
+# (for example, Papilio aegeus may resolve as Papilio (Princeps) aegeus).
+# Keeping this False avoids silently filtering valid records down to zero.
+EXACT_TAXON_NAME_FILTER_WHEN_NO_LSID = False
 
 # If True, add fq=taxon_name:"Species name" even when LSID is supplied.
 # This can be stricter but may exclude records if ALA normalises names differently.
@@ -469,6 +470,73 @@ def normalise_record(target: SpeciesTarget, record: dict[str, Any]) -> dict[str,
     return row
 
 
+def normalise_taxon_name(value: Any) -> str | None:
+    text = normalise_text_cell(value)
+
+    if not text:
+        return None
+
+    text = text.lower()
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def record_taxon_names(record: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+
+    for field in (
+        "scientificName",
+        "raw_scientificName",
+        "species",
+        "subspecies",
+        "vernacularName",
+    ):
+        name = normalise_text_cell(record.get(field))
+
+        if name and name not in names:
+            names.append(name)
+
+    return names
+
+
+def record_matches_query_name(target: SpeciesTarget, record: dict[str, Any]) -> bool:
+    expected = normalise_taxon_name(target.scientific_name)
+
+    if not expected:
+        return False
+
+    for name in record_taxon_names(record):
+        candidate = normalise_taxon_name(name)
+
+        if candidate == expected:
+            return True
+
+    return False
+
+
+def warn_if_query_resolves_to_different_taxon(target: SpeciesTarget, data: dict[str, Any]) -> None:
+    if target.taxon_lsid:
+        return
+
+    records = data.get("occurrences", [])
+
+    if not records:
+        return
+
+    first_record = records[0]
+
+    if record_matches_query_name(target, first_record):
+        return
+
+    names = ", ".join(record_taxon_names(first_record)) or "unknown"
+    log(
+        f"Warning: species={target.key} query_name={target.scientific_name!r} "
+        f"resolved first record to different ALA taxon/name(s): {names}. "
+        "Prefer a taxon_lsid when strict taxonomy is required."
+    )
+
+
 # =============================================================================
 # QUERY BUILDING
 # =============================================================================
@@ -561,6 +629,7 @@ def fetch_json(target: SpeciesTarget, start: int, page_size: int) -> dict[str, A
 def fetch_total_records(target: SpeciesTarget) -> int:
     data = fetch_json(target=target, start=0, page_size=1)
     total = int(data.get("totalRecords", 0))
+    warn_if_query_resolves_to_different_taxon(target, data)
 
     if MAX_RECORDS_PER_SPECIES is not None:
         total = min(total, MAX_RECORDS_PER_SPECIES)
@@ -880,7 +949,10 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
     if target.taxon_lsid:
         log(f"Using LSID query: {target.taxon_lsid}")
     else:
-        log("No LSID supplied; using scientific-name query plus exact taxon_name filter.")
+        if EXACT_TAXON_NAME_FILTER_WHEN_NO_LSID:
+            log("No LSID supplied; using scientific-name query plus exact taxon_name filter.")
+        else:
+            log("No LSID supplied; using scientific-name query without exact taxon_name filter.")
 
     total_records = fetch_total_records(target)
     log(f"Species={target.key}: ALA reported total records={total_records:,}")
