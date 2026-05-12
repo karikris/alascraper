@@ -133,6 +133,8 @@ EXACT_TAXON_NAME_FILTER_WHEN_LSID_SUPPLIED = False
 ALA_SORT_FIELD = "eventDate"
 ALA_SORT_DIRECTION = "asc"
 DEDUPE_BY_UUID = True
+SEARCH_API_MAX_WINDOW = 5_000
+YEAR_FACET_LIMIT = 1_000
 
 # -------------------------------------------------------------------------
 # Performance controls
@@ -328,6 +330,8 @@ class PageTask:
     page_index: int
     start: int
     page_size: int
+    extra_fq_filters: tuple[str, ...] = ()
+    partition_label: str = "all"
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +341,13 @@ class PageResult:
     start: int
     count: int
     shard_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class QueryPartition:
+    label: str
+    extra_fq_filters: tuple[str, ...]
+    total_records: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -622,7 +633,12 @@ def build_fq_filters(target: SpeciesTarget) -> list[str]:
     return filters
 
 
-def build_params(target: SpeciesTarget, start: int, page_size: int) -> list[tuple[str, str | int]]:
+def build_params(
+    target: SpeciesTarget,
+    start: int,
+    page_size: int,
+    extra_fq_filters: tuple[str, ...] = (),
+) -> list[tuple[str, str | int]]:
     params: list[tuple[str, str | int]] = [
         ("q", build_query(target)),
         ("qualityProfile", QUALITY_PROFILE),
@@ -634,7 +650,7 @@ def build_params(target: SpeciesTarget, start: int, page_size: int) -> list[tupl
         ("facet", "false"),
     ]
 
-    for fq in build_fq_filters(target):
+    for fq in [*build_fq_filters(target), *extra_fq_filters]:
         params.append(("fq", fq))
 
     return params
@@ -676,6 +692,8 @@ def species_run_config(target: SpeciesTarget) -> dict[str, Any]:
         "ala_sort_field": ALA_SORT_FIELD,
         "ala_sort_direction": ALA_SORT_DIRECTION,
         "dedupe_by_uuid": DEDUPE_BY_UUID,
+        "search_api_max_window": SEARCH_API_MAX_WINDOW,
+        "year_facet_limit": YEAR_FACET_LIMIT,
         "query": build_query(target),
         "fq_filters": build_fq_filters(target),
         "page_size": PAGE_SIZE,
@@ -797,8 +815,18 @@ def close_all_sessions() -> None:
 atexit.register(close_all_sessions)
 
 
-def fetch_json(target: SpeciesTarget, start: int, page_size: int) -> dict[str, Any]:
-    params = build_params(target=target, start=start, page_size=page_size)
+def fetch_json(
+    target: SpeciesTarget,
+    start: int,
+    page_size: int,
+    extra_fq_filters: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    params = build_params(
+        target=target,
+        start=start,
+        page_size=page_size,
+        extra_fq_filters=extra_fq_filters,
+    )
     last_error: Exception | None = None
     session = get_thread_session()
 
@@ -830,15 +858,107 @@ def fetch_json(target: SpeciesTarget, start: int, page_size: int) -> dict[str, A
     )
 
 
-def fetch_total_records(target: SpeciesTarget) -> int:
-    data = fetch_json(target=target, start=0, page_size=1)
+def fetch_total_records(
+    target: SpeciesTarget,
+    extra_fq_filters: tuple[str, ...] = (),
+    warn_on_taxon_resolution: bool = True,
+) -> int:
+    data = fetch_json(target=target, start=0, page_size=1, extra_fq_filters=extra_fq_filters)
     total = int(data.get("totalRecords", 0))
-    warn_if_query_resolves_to_different_taxon(target, data)
+
+    if warn_on_taxon_resolution:
+        warn_if_query_resolves_to_different_taxon(target, data)
 
     if MAX_RECORDS_PER_SPECIES is not None:
         total = min(total, MAX_RECORDS_PER_SPECIES)
 
     return total
+
+
+def fetch_year_facet_partitions(target: SpeciesTarget) -> list[QueryPartition]:
+    params: list[tuple[str, str | int]] = [
+        ("q", build_query(target)),
+        ("qualityProfile", QUALITY_PROFILE),
+        ("qc", QUALITY_CONTROL),
+        (START_PARAM_NAME, 0),
+        ("pageSize", 0),
+        ("sort", ALA_SORT_FIELD),
+        ("dir", ALA_SORT_DIRECTION),
+        ("facet", "true"),
+        ("facets", "year"),
+        ("flimit", YEAR_FACET_LIMIT),
+    ]
+
+    for fq in build_fq_filters(target):
+        params.append(("fq", fq))
+
+    response = get_thread_session().get(API_URL, params=params, timeout=TIMEOUT_SECONDS)
+    response.raise_for_status()
+    data = response.json()
+    partitions: list[QueryPartition] = []
+
+    for facet in data.get("facetResults", []):
+        if facet.get("fieldName") != "year":
+            continue
+
+        for result in facet.get("fieldResult", []):
+            count = int(result.get("count", 0))
+            fq = normalise_text_cell(result.get("fq"))
+            label = normalise_text_cell(result.get("label")) or "unknown"
+
+            if count <= 0 or not fq:
+                continue
+
+            partitions.append(
+                QueryPartition(
+                    label=f"year={label}",
+                    extra_fq_filters=(fq,),
+                    total_records=count,
+                )
+            )
+
+    return partitions
+
+
+def make_query_partitions(target: SpeciesTarget, total_records: int) -> list[QueryPartition]:
+    if total_records <= SEARCH_API_MAX_WINDOW:
+        return [
+            QueryPartition(
+                label="all",
+                extra_fq_filters=(),
+                total_records=total_records,
+            )
+        ]
+
+    partitions = fetch_year_facet_partitions(target)
+
+    if not partitions:
+        log(
+            f"Species={target.key}: warning: no year facets available; "
+            f"search API may return only first {SEARCH_API_MAX_WINDOW:,} rows."
+        )
+        return [
+            QueryPartition(
+                label="all",
+                extra_fq_filters=(),
+                total_records=min(total_records, SEARCH_API_MAX_WINDOW),
+            )
+        ]
+
+    oversized = [partition for partition in partitions if partition.total_records > SEARCH_API_MAX_WINDOW]
+
+    if oversized:
+        labels = ", ".join(f"{p.label} ({p.total_records:,})" for p in oversized)
+        raise RuntimeError(
+            f"Species={target.key}: year partition(s) exceed search API window: {labels}"
+        )
+
+    partition_total = sum(partition.total_records for partition in partitions)
+    log(
+        f"Species={target.key}: split {total_records:,} records into "
+        f"{len(partitions):,} year partitions; partition_total={partition_total:,}"
+    )
+    return partitions
 
 
 # =============================================================================
@@ -862,7 +982,12 @@ def write_page_shard(task: PageTask) -> PageResult:
         except Exception:
             path.unlink(missing_ok=True)
 
-    data = fetch_json(target=target, start=task.start, page_size=task.page_size)
+    data = fetch_json(
+        target=target,
+        start=task.start,
+        page_size=task.page_size,
+        extra_fq_filters=task.extra_fq_filters,
+    )
     records = data.get("occurrences", [])
 
     if WRITE_RAW_PAGE_JSON:
@@ -895,18 +1020,28 @@ def write_page_shard(task: PageTask) -> PageResult:
     )
 
 
-def make_tasks(target: SpeciesTarget, total_records: int) -> list[PageTask]:
-    total_pages = math.ceil(total_records / PAGE_SIZE)
+def make_tasks(target: SpeciesTarget, partitions: list[QueryPartition]) -> list[PageTask]:
+    tasks: list[PageTask] = []
+    page_index = 0
 
-    return [
-        PageTask(
-            target=target,
-            page_index=page_index,
-            start=page_index * PAGE_SIZE,
-            page_size=min(PAGE_SIZE, total_records - page_index * PAGE_SIZE),
-        )
-        for page_index in range(total_pages)
-    ]
+    for partition in partitions:
+        total_pages = math.ceil(partition.total_records / PAGE_SIZE)
+
+        for partition_page_index in range(total_pages):
+            start = partition_page_index * PAGE_SIZE
+            tasks.append(
+                PageTask(
+                    target=target,
+                    page_index=page_index,
+                    start=start,
+                    page_size=min(PAGE_SIZE, partition.total_records - start),
+                    extra_fq_filters=partition.extra_fq_filters,
+                    partition_label=partition.label,
+                )
+            )
+            page_index += 1
+
+    return tasks
 
 
 def run_parallel_fetch_for_species(target: SpeciesTarget, tasks: list[PageTask]) -> list[PageResult]:
@@ -1256,8 +1391,12 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
             species_parquet_path=empty_path,
         )
 
-    tasks = make_tasks(target, total_records)
-    log(f"Species={target.key}: pages to fetch={len(tasks):,}")
+    partitions = make_query_partitions(target, total_records)
+    tasks = make_tasks(target, partitions)
+    log(
+        f"Species={target.key}: pages to fetch={len(tasks):,}; "
+        f"partitions={len(partitions):,}"
+    )
 
     page_results = run_parallel_fetch_for_species(target, tasks)
     rows_written = sum(result.count for result in page_results)
