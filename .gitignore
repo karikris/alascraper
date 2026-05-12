@@ -1,0 +1,9 @@
+AGENTS.md
+__pycache__/
+*.py[cod]
+.env
+.venv/
+outputs/
+*.duckdb
+*.parquet
+*.csv
