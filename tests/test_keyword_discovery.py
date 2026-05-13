@@ -51,6 +51,12 @@ def test_keyword_records_to_discoveries_extracts_scientific_names() -> None:
     ]
 
 
+def test_placeholder_taxon_labels_are_not_scientific_names() -> None:
+    assert not a.is_probable_scientific_name("Not supplied")
+    assert not a.is_probable_scientific_name("Unknown species")
+    assert not a.is_probable_scientific_name("Unidentified taxon")
+
+
 def test_discoveries_to_species_targets_dedupes_by_lsid() -> None:
     discoveries = [
         a.KeywordSpeciesDiscovery(

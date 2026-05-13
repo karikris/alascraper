@@ -66,6 +66,15 @@ USER_AGENT = (
     "(contact: replace-with-your-email@monash.edu)"
 )
 
+INVALID_TAXON_LABELS = {
+    "not supplied",
+    "not provided",
+    "not recorded",
+    "unknown",
+    "unidentified",
+    "other values",
+}
+
 
 # =============================================================================
 # HELPERS
@@ -82,9 +91,16 @@ def is_probable_scientific_name(name: str) -> bool:
     Keep species/subspecies-like names; exclude genus/family/order labels.
     Allows names like `Papilio aegeus` and `Papilio aegeus aegeus`.
     """
-    parts = name.strip().split()
+    text = name.strip()
+    parts = text.split()
 
     if len(parts) < 2:
+        return False
+
+    if text.lower() in INVALID_TAXON_LABELS:
+        return False
+
+    if parts[0].lower() in {"not", "unknown", "unidentified"}:
         return False
 
     return bool(re.match(r"^[A-Z][a-zA-Z-]+$", parts[0]))

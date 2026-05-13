@@ -215,6 +215,15 @@ KEYWORD_DISCOVERY_FIELDS = [
     "order",
 ]
 
+INVALID_TAXON_LABELS = {
+    "not supplied",
+    "not provided",
+    "not recorded",
+    "unknown",
+    "unidentified",
+    "other values",
+}
+
 # -------------------------------------------------------------------------
 # Performance controls
 # -------------------------------------------------------------------------
@@ -459,9 +468,16 @@ def safe_key(text: str) -> str:
 
 
 def is_probable_scientific_name(name: str) -> bool:
-    parts = name.strip().split()
+    text = name.strip()
+    parts = text.split()
 
     if len(parts) < 2:
+        return False
+
+    if text.lower() in INVALID_TAXON_LABELS:
+        return False
+
+    if parts[0].lower() in {"not", "unknown", "unidentified"}:
         return False
 
     return bool(re.match(r"^[A-Z][a-zA-Z-]+$", parts[0]))
