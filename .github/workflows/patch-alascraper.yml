@@ -182,3 +182,5 @@ jobs:
           git add alascraper.py README.md .github/workflows/patch-alascraper.yml
           git commit -m "Validate ALA page counts and refresh defaults"
           git push
+
+# trigger: 2026-05-13
