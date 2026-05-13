@@ -146,7 +146,6 @@ From Python, override runtime constants without editing the source file:
 
 The script logs when ALA resolves a requested scientific name to a different accepted or normalised taxon name. For strict taxonomic workflows, supply ALA LSIDs in `SPECIES_TARGETS` and validate records against:
 
-- Butterflies Australia
 - Atlas of Living Australia
 - GBIF
 - Australian Faunal Directory / Braby taxonomy where needed
