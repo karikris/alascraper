@@ -14,7 +14,7 @@ def target() -> a.SpeciesTarget:
     return a.SpeciesTarget(
         key="test_species",
         scientific_name="Testus species",
-        common_name="Test butterfly",
+        common_name="Test taxon",
         taxon_lsid=None,
     )
 
@@ -24,7 +24,7 @@ def lsid_target() -> a.SpeciesTarget:
     return a.SpeciesTarget(
         key="lsid_species",
         scientific_name="Lsidus species",
-        common_name="LSID butterfly",
+        common_name="LSID taxon",
         taxon_lsid="urn:lsid:biodiversity.org.au:afd.taxon:test",
     )
 

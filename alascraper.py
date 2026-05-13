@@ -22,7 +22,8 @@ Default output:
 Design:
   - Species are controlled by SPECIES_TARGETS near the top.
   - If a species has an ALA LSID, q=lsid:<LSID> is used.
-  - If no LSID is supplied, q=<scientific_name> is used with an exact taxon_name filter.
+  - If no LSID is supplied, q=<scientific_name> is used without an exact
+    taxon_name filter by default, because ALA can normalise accepted names.
   - Each species is fetched page-by-page in parallel.
   - Each species gets its own Parquet folder.
   - DuckDB merges all species Parquet files into one final all-species Parquet.
@@ -65,7 +66,7 @@ API_URL = "https://biocache-ws.ala.org.au/ws/occurrences/search"
 # Prefer ALA LSIDs where available. Leave taxon_lsid=None to query by
 # scientific name.
 #
-# Replace these with the Australian butterfly species you want to fetch.
+# Replace these with the ALA taxa/species you want to fetch.
 # Keep `key` short, lowercase, filesystem-safe, and unique.
 # -------------------------------------------------------------------------
 
@@ -185,7 +186,7 @@ PARQUET_COMPRESSION_LEVEL = 3
 PARQUET_ROW_GROUP_SIZE = 100_000
 
 USER_AGENT = (
-    "Monash-Australian-butterfly-occurrence-research/0.3 "
+    "Monash-ALA-species-occurrence-research/0.4 "
     "(contact: replace-with-your-email@monash.edu)"
 )
 

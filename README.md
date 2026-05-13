@@ -1,6 +1,6 @@
 # alascraper
 
-`alascraper` is a Python 3.14 workflow for fetching Australian butterfly occurrence records from the Atlas of Living Australia (ALA) species by species. It is designed for reproducible ecological data collection with fast parallel fetching, privacy-conscious default outputs, and efficient local storage in Parquet, DuckDB, and optional CSV formats.
+`alascraper` is a Python 3.14 workflow for fetching Atlas of Living Australia (ALA) occurrence records species by species. It is designed as a reusable scraper for different taxa, species sets, and ALA-backed data providers, with fast parallel fetching, privacy-conscious default outputs, and efficient local storage in Parquet, DuckDB, and optional CSV formats.
 
 ## Ownership
 
@@ -10,13 +10,14 @@ Lab website: <https://shawanchowdhurylab.com/>
 
 ## Purpose
 
-The script supports Australia-localised butterfly range and spread studies by building occurrence datasets from ALA-backed biodiversity records. The intended baseline data sources are:
+The script supports reproducible species occurrence studies by building datasets from ALA-backed biodiversity records. It can be repurposed for different species groups and provider filters while keeping the same fetch, normalisation, and output pipeline. Example source families include:
 
-- Butterflies Australia records available through ALA
+- ALA biodiversity records for configured taxa
 - iNaturalist Australia records available through ALA
-- Other ALA biodiversity data providers relevant to Australian butterfly observations
+- Specialist provider datasets represented in ALA
+- Additional ALA data resources selected through query/filter constants
 
-The workflow is species-by-species so the target species list can be edited and reused for different butterfly taxa.
+The workflow is species-by-species so `SPECIES_TARGETS` can be edited and reused for different taxa, regions, or ALA data-resource filters.
 
 ## Current Script
 
@@ -26,14 +27,14 @@ Main entry point:
 python alascraper.py
 ```
 
-The script currently targets these example species in `SPECIES_TARGETS`:
+The script currently targets these example butterfly species in `SPECIES_TARGETS`:
 
 - `Papilio aegeus` - Orchard Swallowtail
 - `Graphium sarpedon` - Blue Triangle
 - `Danaus plexippus` - Monarch
 - `Pieris rapae` - Cabbage White
 
-Edit `SPECIES_TARGETS` in `alascraper.py` to fetch another species set. Prefer ALA taxon LSIDs where available for stricter taxonomy.
+Edit `SPECIES_TARGETS` in `alascraper.py` to fetch another species set. Prefer ALA taxon LSIDs where available for stricter taxonomy. Add provider, region, or quality filters through the query constants rather than hard-coding them in output logic.
 
 ## Features
 
