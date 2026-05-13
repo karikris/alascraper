@@ -27,14 +27,15 @@ Main entry point:
 python alascraper.py
 ```
 
-The script currently targets these example butterfly species in `SPECIES_TARGETS`:
+For the Australian butterfly workflow, `alascraper.py` first refreshes the ALA-backed scientific-name list by running `fetch_australian_butterfly_species.py`, then imports:
 
-- `Papilio aegeus` - Orchard Swallowtail
-- `Graphium sarpedon` - Blue Triangle
-- `Danaus plexippus` - Monarch
-- `Pieris rapae` - Cabbage White
+```python
+from outputs.species_targets_generated import SPECIES_TARGETS
+```
 
-Edit `SPECIES_TARGETS` in `alascraper.py` to fetch another species set. Prefer ALA taxon LSIDs where available for stricter taxonomy. Add provider, region, or quality filters through the query constants rather than hard-coding them in output logic.
+The generated targets are used as the species-by-species query list. Prefer ALA taxon LSIDs where available for stricter taxonomy. Add provider, region, or quality filters through the query constants rather than hard-coding them in output logic.
+
+The generated list is occurrence-backed, not a static taxonomic monograph. Validate publication taxonomy against Braby / Australian Faunal Directory where needed.
 
 ## Features
 
@@ -83,13 +84,38 @@ The local `.venv/`, generated outputs, DuckDB files, Parquet files, and CSV file
 Common constants in `alascraper.py`:
 
 ```python
-SPECIES_TARGETS = [...]
+REFRESH_SPECIES_TARGETS_BEFORE_RUN = True
 WORKERS = 12
 PAGE_SIZE = 500
 MAX_RECORDS_PER_SPECIES = None
 WRITE_CSV = False
 FRESH_RUN = False
 OUTPUT_ROOT = Path("outputs") / "ala_species_records"
+```
+
+To run with explicit targets instead of the generated butterfly list:
+
+```python
+import alascraper as a
+
+a.run_alascraper(
+    species_targets=[
+        {"key": "papilio_aegeus", "scientific_name": "Papilio aegeus"},
+    ],
+    write_csv=False,
+    refresh_generated_targets=False,
+)
+```
+
+To use the keyword discovery workflow directly:
+
+```python
+import alascraper as a
+
+a.run_alascraper(
+    keyword_targets=a.KEYWORD_TARGETS,
+    write_csv=False,
+)
 ```
 
 For a small capped run, set:

@@ -36,6 +36,7 @@ import concurrent.futures as cf
 import atexit
 import csv
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -47,7 +48,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import duckdb
 import polars as pl
@@ -78,32 +79,96 @@ class SpeciesTarget:
     taxon_lsid: str | None = None
 
 
-SPECIES_TARGETS: list[SpeciesTarget] = [
-    SpeciesTarget(
-        key="papilio_aegeus",
-        scientific_name="Papilio aegeus",
-        common_name="Orchard Swallowtail",
-        taxon_lsid=None,
-    ),
-    SpeciesTarget(
-        key="graphium_sarpedon",
-        scientific_name="Graphium sarpedon",
-        common_name="Blue Triangle",
-        taxon_lsid=None,
-    ),
-    SpeciesTarget(
-        key="danaus_plexippus",
-        scientific_name="Danaus plexippus",
-        common_name="Monarch",
-        taxon_lsid=None,
-    ),
-    SpeciesTarget(
-        key="pieris_rapae",
-        scientific_name="Pieris rapae",
-        common_name="Cabbage White",
-        taxon_lsid=None,
-    ),
-]
+@dataclass(frozen=True, slots=True)
+class KeywordSpeciesDiscovery:
+    keyword_key: str
+    query: str
+    scientific_name: str
+    taxon_lsid: str | None
+    common_name: str | None
+    taxon_rank: str | None
+    family: str | None
+    order: str | None
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+GENERATED_SPECIES_TARGETS_PATH = REPO_ROOT / "outputs" / "species_targets_generated.py"
+SPECIES_TARGETS_GENERATOR_SCRIPT = REPO_ROOT / "fetch_australian_butterfly_species.py"
+
+# Normal research runs refresh the ALA-backed scientific-name list first, then
+# import outputs.species_targets_generated.SPECIES_TARGETS.
+REFRESH_SPECIES_TARGETS_BEFORE_RUN = True
+
+# Optional fallback for programmatic/custom runs. The default main workflow uses
+# the generated ALA-backed list rather than maintaining a static four-species
+# example block in this file.
+SPECIES_TARGETS: list[SpeciesTarget] = []
+
+KEYWORD_TARGETS = {
+    "general_butterfly": {
+        "QUERY": "butterfly",
+        "FACET_FILTERS": [
+            'country:"Australia"',
+            'order:"Lepidoptera"',
+        ],
+    },
+    "butterflies_plural": {
+        "QUERY": "butterflies",
+        "FACET_FILTERS": [
+            'country:"Australia"',
+            'order:"Lepidoptera"',
+        ],
+    },
+    "swallowtail": {
+        "QUERY": "swallowtail",
+        "FACET_FILTERS": [
+            'country:"Australia"',
+            'order:"Lepidoptera"',
+        ],
+    },
+    "skipper": {
+        "QUERY": "skipper",
+        "FACET_FILTERS": [
+            'country:"Australia"',
+            'order:"Lepidoptera"',
+        ],
+    },
+    "blue_butterfly": {
+        "QUERY": "blue butterfly",
+        "FACET_FILTERS": [
+            'country:"Australia"',
+            'order:"Lepidoptera"',
+        ],
+    },
+    "monarch": {
+        "QUERY": "monarch butterfly",
+        "FACET_FILTERS": [
+            'country:"Australia"',
+            'order:"Lepidoptera"',
+        ],
+    },
+    "copper": {
+        "QUERY": "copper butterfly",
+        "FACET_FILTERS": [
+            'country:"Australia"',
+            'order:"Lepidoptera"',
+        ],
+    },
+    "jezebel": {
+        "QUERY": "jezebel butterfly",
+        "FACET_FILTERS": [
+            'country:"Australia"',
+            'order:"Lepidoptera"',
+        ],
+    },
+    "grass_yellow": {
+        "QUERY": "grass yellow butterfly",
+        "FACET_FILTERS": [
+            'country:"Australia"',
+            'order:"Lepidoptera"',
+        ],
+    },
+}
 
 # -------------------------------------------------------------------------
 # Query controls
@@ -136,6 +201,19 @@ ALA_SORT_DIRECTION = "asc"
 DEDUPE_BY_UUID = True
 SEARCH_API_MAX_WINDOW = 5_000
 YEAR_FACET_LIMIT = 1_000
+KEYWORD_DISCOVERY_PAGE_SIZE = 500
+KEYWORD_DISCOVERY_MAX_RECORDS_PER_KEYWORD = SEARCH_API_MAX_WINDOW
+KEYWORD_DISCOVERY_FIELDS = [
+    "uuid",
+    "scientificName",
+    "raw_scientificName",
+    "species",
+    "taxonConceptID",
+    "vernacularName",
+    "taxonRank",
+    "family",
+    "order",
+]
 
 # -------------------------------------------------------------------------
 # Performance controls
@@ -378,6 +456,122 @@ def safe_key(text: str) -> str:
     text = text.strip().lower()
     text = re.sub(r"[^a-z0-9]+", "_", text)
     return text.strip("_")
+
+
+def is_probable_scientific_name(name: str) -> bool:
+    parts = name.strip().split()
+
+    if len(parts) < 2:
+        return False
+
+    return bool(re.match(r"^[A-Z][a-zA-Z-]+$", parts[0]))
+
+
+def coerce_species_target(value: SpeciesTarget | dict[str, Any]) -> SpeciesTarget:
+    if isinstance(value, SpeciesTarget):
+        return value
+
+    if not isinstance(value, dict):
+        raise TypeError(f"Unsupported species target type: {type(value).__name__}")
+
+    try:
+        scientific_name = str(value["scientific_name"]).strip()
+    except KeyError as exc:
+        raise ValueError("Generated species target is missing 'scientific_name'.") from exc
+
+    key = str(value.get("key") or safe_key(scientific_name)).strip()
+
+    if not key or not scientific_name:
+        raise ValueError(f"Invalid generated species target: {value!r}")
+
+    return SpeciesTarget(
+        key=key,
+        scientific_name=scientific_name,
+        common_name=value.get("common_name"),
+        taxon_lsid=value.get("taxon_lsid"),
+    )
+
+
+def generate_species_targets_file(refresh: bool = REFRESH_SPECIES_TARGETS_BEFORE_RUN) -> None:
+    if GENERATED_SPECIES_TARGETS_PATH.exists() and not refresh:
+        return
+
+    if not SPECIES_TARGETS_GENERATOR_SCRIPT.exists():
+        raise FileNotFoundError(
+            f"Missing species target generator script: {SPECIES_TARGETS_GENERATOR_SCRIPT}"
+        )
+
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+
+    module = importlib.import_module("fetch_australian_butterfly_species")
+
+    if not hasattr(module, "generate_species_targets"):
+        raise AttributeError(
+            "fetch_australian_butterfly_species.py must define generate_species_targets()."
+        )
+
+    module.generate_species_targets()
+
+
+def load_generated_species_targets() -> list[SpeciesTarget]:
+    if not GENERATED_SPECIES_TARGETS_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing generated species targets: {GENERATED_SPECIES_TARGETS_PATH}. "
+            "Run fetch_australian_butterfly_species.py first."
+        )
+
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+
+    importlib.invalidate_caches()
+    module_name = "outputs.species_targets_generated"
+
+    if module_name in sys.modules:
+        module = importlib.reload(sys.modules[module_name])
+    else:
+        module = importlib.import_module(module_name)
+
+    generated_targets = getattr(module, "SPECIES_TARGETS", None)
+
+    if generated_targets is None:
+        raise AttributeError(
+            "outputs.species_targets_generated must define SPECIES_TARGETS."
+        )
+
+    targets = [coerce_species_target(target) for target in generated_targets]
+
+    if not targets:
+        raise ValueError("Generated SPECIES_TARGETS is empty.")
+
+    return targets
+
+
+def resolve_species_targets(
+    species_targets: list[SpeciesTarget | dict[str, Any]] | None = None,
+    *,
+    refresh_generated_targets: bool = REFRESH_SPECIES_TARGETS_BEFORE_RUN,
+) -> list[SpeciesTarget]:
+    if species_targets is not None:
+        targets = [coerce_species_target(target) for target in species_targets]
+    elif SPECIES_TARGETS:
+        targets = [coerce_species_target(target) for target in SPECIES_TARGETS]
+    else:
+        generate_species_targets_file(refresh=refresh_generated_targets)
+        targets = load_generated_species_targets()
+
+    seen: set[str] = set()
+    duplicates: list[str] = []
+
+    for target in targets:
+        if target.key in seen:
+            duplicates.append(target.key)
+        seen.add(target.key)
+
+    if duplicates:
+        raise ValueError(f"Duplicate species target keys: {', '.join(sorted(set(duplicates)))}")
+
+    return targets
 
 
 def species_dir(target: SpeciesTarget) -> Path:
@@ -655,6 +849,201 @@ def build_params(
         params.append(("fq", fq))
 
     return params
+
+
+# =============================================================================
+# KEYWORD DISCOVERY
+# =============================================================================
+
+def build_keyword_params(
+    query: str,
+    start: int,
+    page_size: int,
+    facet_filters: tuple[str, ...],
+) -> list[tuple[str, str | int]]:
+    params: list[tuple[str, str | int]] = [
+        ("q", query),
+        ("qualityProfile", QUALITY_PROFILE),
+        ("qc", QUALITY_CONTROL),
+        (START_PARAM_NAME, start),
+        ("pageSize", page_size),
+        ("sort", ALA_SORT_FIELD),
+        ("dir", ALA_SORT_DIRECTION),
+        ("facet", "false"),
+        ("fl", ",".join(KEYWORD_DISCOVERY_FIELDS)),
+    ]
+
+    for fq in facet_filters:
+        params.append(("fq", fq))
+
+    return params
+
+
+def fetch_keyword_json(
+    *,
+    keyword_key: str,
+    query: str,
+    start: int,
+    page_size: int,
+    facet_filters: tuple[str, ...],
+) -> dict[str, Any]:
+    params = build_keyword_params(
+        query=query,
+        start=start,
+        page_size=page_size,
+        facet_filters=facet_filters,
+    )
+    last_error: Exception | None = None
+    session = get_thread_session()
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = session.get(API_URL, params=params, timeout=TIMEOUT_SECONDS)
+
+            if response.status_code == 429:
+                wait = min(120, 10 * attempt)
+                log(f"HTTP 429 for keyword={keyword_key}, start={start}. Sleeping {wait}s.")
+                response.close()
+                time.sleep(wait)
+                continue
+
+            response.raise_for_status()
+            return response.json()
+
+        except Exception as exc:
+            last_error = exc
+            wait = min(120, 2**attempt)
+            log(
+                f"Keyword discovery failed: keyword={keyword_key}, start={start}, "
+                f"attempt={attempt}/{MAX_RETRIES}, error={exc}. Retrying in {wait}s."
+            )
+            time.sleep(wait)
+
+    raise RuntimeError(
+        f"Failed keyword={keyword_key}, start={start} after {MAX_RETRIES} retries: {last_error}"
+    )
+
+
+def scientific_name_from_discovery_record(record: dict[str, Any]) -> str | None:
+    for field in ("scientificName", "raw_scientificName", "species"):
+        name = normalise_text_cell(record.get(field))
+
+        if name and is_probable_scientific_name(name):
+            return name
+
+    return None
+
+
+def keyword_records_to_discoveries(
+    keyword_key: str,
+    query: str,
+    records: list[dict[str, Any]],
+) -> list[KeywordSpeciesDiscovery]:
+    discoveries: list[KeywordSpeciesDiscovery] = []
+
+    for record in records:
+        scientific_name = scientific_name_from_discovery_record(record)
+
+        if not scientific_name:
+            continue
+
+        discoveries.append(
+            KeywordSpeciesDiscovery(
+                keyword_key=keyword_key,
+                query=query,
+                scientific_name=scientific_name,
+                taxon_lsid=normalise_text_cell(record.get("taxonConceptID")),
+                common_name=normalise_text_cell(record.get("vernacularName")),
+                taxon_rank=normalise_text_cell(record.get("taxonRank")),
+                family=normalise_text_cell(record.get("family")),
+                order=normalise_text_cell(record.get("order")),
+            )
+        )
+
+    return discoveries
+
+
+def discover_species_from_keyword_targets(
+    keyword_targets: Mapping[str, Mapping[str, Any]] = KEYWORD_TARGETS,
+) -> list[KeywordSpeciesDiscovery]:
+    all_discoveries: list[KeywordSpeciesDiscovery] = []
+
+    for keyword_key, config in keyword_targets.items():
+        query = str(config["QUERY"])
+        facet_filters = tuple(str(fq) for fq in config.get("FACET_FILTERS", ()))
+        max_records = int(config.get("MAX_RECORDS", KEYWORD_DISCOVERY_MAX_RECORDS_PER_KEYWORD))
+        start = 0
+
+        log(
+            f"Keyword discovery: key={keyword_key}; query={query!r}; "
+            f"max_records={max_records:,}"
+        )
+
+        while start < max_records:
+            page_size = min(KEYWORD_DISCOVERY_PAGE_SIZE, max_records - start)
+            data = fetch_keyword_json(
+                keyword_key=keyword_key,
+                query=query,
+                start=start,
+                page_size=page_size,
+                facet_filters=facet_filters,
+            )
+            records = data.get("occurrences", [])
+
+            if not records:
+                break
+
+            all_discoveries.extend(
+                keyword_records_to_discoveries(keyword_key, query, records)
+            )
+
+            total_records = int(data.get("totalRecords", 0) or 0)
+            start += len(records)
+
+            if start >= total_records or len(records) < page_size:
+                break
+
+    return all_discoveries
+
+
+def discoveries_to_species_targets(
+    discoveries: list[KeywordSpeciesDiscovery],
+) -> list[SpeciesTarget]:
+    merged: dict[str, KeywordSpeciesDiscovery] = {}
+
+    for discovery in discoveries:
+        dedupe_key = discovery.taxon_lsid or normalise_taxon_name(discovery.scientific_name)
+
+        if not dedupe_key:
+            continue
+
+        existing = merged.get(dedupe_key)
+
+        if existing is None:
+            merged[dedupe_key] = discovery
+            continue
+
+        if existing.taxon_lsid is None and discovery.taxon_lsid:
+            merged[dedupe_key] = discovery
+
+    targets = [
+        SpeciesTarget(
+            key=safe_key(discovery.scientific_name),
+            scientific_name=discovery.scientific_name,
+            common_name=discovery.common_name,
+            taxon_lsid=discovery.taxon_lsid,
+        )
+        for discovery in merged.values()
+    ]
+    return sorted(targets, key=lambda target: (target.scientific_name, target.taxon_lsid or ""))
+
+
+def discover_species_targets_from_keywords(
+    keyword_targets: Mapping[str, Mapping[str, Any]] = KEYWORD_TARGETS,
+) -> list[SpeciesTarget]:
+    return discoveries_to_species_targets(
+        discover_species_from_keyword_targets(keyword_targets)
+    )
 
 
 # =============================================================================
@@ -1278,7 +1667,10 @@ def merge_all_species(species_results: list[SpeciesResult]) -> None:
 # MANIFEST
 # =============================================================================
 
-def write_manifest(species_results: list[SpeciesResult]) -> None:
+def write_manifest(
+    species_results: list[SpeciesResult],
+    species_targets: list[SpeciesTarget],
+) -> None:
     MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with MANIFEST_PATH.open("w", encoding="utf-8", newline="") as handle:
@@ -1303,7 +1695,7 @@ def write_manifest(species_results: list[SpeciesResult]) -> None:
         )
         writer.writeheader()
 
-        target_lookup = {target.key: target for target in SPECIES_TARGETS}
+        target_lookup = {target.key: target for target in species_targets}
 
         for result in species_results:
             target = target_lookup[result.species_key]
@@ -1426,14 +1818,37 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
     )
 
 
-def main() -> int:
+def run_alascraper(
+    *,
+    species_targets: list[SpeciesTarget | dict[str, Any]] | None = None,
+    keyword_targets: Mapping[str, Mapping[str, Any]] | None = None,
+    write_csv: bool | None = None,
+    refresh_generated_targets: bool = REFRESH_SPECIES_TARGETS_BEFORE_RUN,
+) -> int:
+    global WRITE_CSV
+
+    if write_csv is not None:
+        WRITE_CSV = write_csv
+
     run_started = time.perf_counter()
     validate_privacy_settings()
     prepare_output_dirs()
 
+    if species_targets is not None:
+        active_targets = resolve_species_targets(
+            species_targets,
+            refresh_generated_targets=False,
+        )
+    elif keyword_targets is not None:
+        active_targets = discover_species_targets_from_keywords(keyword_targets)
+    else:
+        active_targets = resolve_species_targets(
+            refresh_generated_targets=refresh_generated_targets,
+        )
+
     log("Starting ALA species-by-species occurrence fetch.")
     log(f"Python version: {sys.version.split()[0]}")
-    log(f"Species targets: {len(SPECIES_TARGETS):,}")
+    log(f"Species targets: {len(active_targets):,}")
     log(f"Workers: {WORKERS}")
     log(f"Page size: {PAGE_SIZE}")
     log(f"CSV output enabled: {WRITE_CSV}")
@@ -1441,12 +1856,12 @@ def main() -> int:
 
     species_results: list[SpeciesResult] = []
 
-    for target in SPECIES_TARGETS:
+    for target in active_targets:
         result = fetch_one_species(target)
         species_results.append(result)
         time.sleep(REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES)
 
-    write_manifest(species_results)
+    write_manifest(species_results, active_targets)
     merge_all_species(species_results)
 
     total_elapsed_seconds = time.perf_counter() - run_started
@@ -1456,6 +1871,10 @@ def main() -> int:
         f"species={len(species_results):,}; shard_rows_written={total_rows:,}"
     )
     return 0
+
+
+def main() -> int:
+    return run_alascraper()
 
 
 if __name__ == "__main__":
