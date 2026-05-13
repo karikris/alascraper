@@ -1281,7 +1281,13 @@ def fetch_total_records(
     return total
 
 
-def fetch_year_facet_partitions(target: SpeciesTarget) -> list[QueryPartition]:
+def fetch_facet_partitions(
+    target: SpeciesTarget,
+    facet_field: str,
+    *,
+    base_label: str | None = None,
+    extra_fq_filters: tuple[str, ...] = (),
+) -> list[QueryPartition]:
     params: list[tuple[str, str | int]] = [
         ("q", build_query(target)),
         ("qualityProfile", QUALITY_PROFILE),
@@ -1291,11 +1297,11 @@ def fetch_year_facet_partitions(target: SpeciesTarget) -> list[QueryPartition]:
         ("sort", ALA_SORT_FIELD),
         ("dir", ALA_SORT_DIRECTION),
         ("facet", "true"),
-        ("facets", "year"),
+        ("facets", facet_field),
         ("flimit", YEAR_FACET_LIMIT),
     ]
 
-    for fq in build_fq_filters(target):
+    for fq in [*build_fq_filters(target), *extra_fq_filters]:
         params.append(("fq", fq))
 
     response = get_thread_session().get(API_URL, params=params, timeout=TIMEOUT_SECONDS)
@@ -1304,7 +1310,7 @@ def fetch_year_facet_partitions(target: SpeciesTarget) -> list[QueryPartition]:
     partitions: list[QueryPartition] = []
 
     for facet in data.get("facetResults", []):
-        if facet.get("fieldName") != "year":
+        if facet.get("fieldName") != facet_field:
             continue
 
         for result in facet.get("fieldResult", []):
@@ -1317,13 +1323,74 @@ def fetch_year_facet_partitions(target: SpeciesTarget) -> list[QueryPartition]:
 
             partitions.append(
                 QueryPartition(
-                    label=f"year={label}",
-                    extra_fq_filters=(fq,),
+                    label=";".join(
+                        part for part in (base_label, f"{facet_field}={label}") if part
+                    ),
+                    extra_fq_filters=(*extra_fq_filters, fq),
                     total_records=count,
                 )
             )
 
     return partitions
+
+
+def fetch_year_facet_partitions(target: SpeciesTarget) -> list[QueryPartition]:
+    return fetch_facet_partitions(target, "year")
+
+
+def split_oversized_year_partitions(
+    target: SpeciesTarget,
+    partitions: list[QueryPartition],
+) -> list[QueryPartition]:
+    out: list[QueryPartition] = []
+
+    for partition in partitions:
+        if partition.total_records <= SEARCH_API_MAX_WINDOW:
+            out.append(partition)
+            continue
+
+        month_partitions = fetch_facet_partitions(
+            target,
+            "month",
+            base_label=partition.label,
+            extra_fq_filters=partition.extra_fq_filters,
+        )
+
+        if not month_partitions:
+            raise RuntimeError(
+                f"Species={target.key}: {partition.label} exceeds search API window "
+                "and has no month facets."
+            )
+
+        oversized_months = [
+            month_partition
+            for month_partition in month_partitions
+            if month_partition.total_records > SEARCH_API_MAX_WINDOW
+        ]
+
+        if oversized_months:
+            labels = ", ".join(
+                f"{p.label} ({p.total_records:,})" for p in oversized_months
+            )
+            raise RuntimeError(
+                f"Species={target.key}: month partition(s) exceed search API window: {labels}"
+            )
+
+        month_total = sum(month_partition.total_records for month_partition in month_partitions)
+
+        if month_total != partition.total_records:
+            raise RuntimeError(
+                f"Species={target.key}: month partitions for {partition.label} "
+                f"sum to {month_total:,}, expected {partition.total_records:,}."
+            )
+
+        log(
+            f"Species={target.key}: split oversized {partition.label} "
+            f"({partition.total_records:,}) into {len(month_partitions):,} month partitions."
+        )
+        out.extend(month_partitions)
+
+    return out
 
 
 def make_query_partitions(target: SpeciesTarget, total_records: int) -> list[QueryPartition]:
@@ -1351,13 +1418,7 @@ def make_query_partitions(target: SpeciesTarget, total_records: int) -> list[Que
             )
         ]
 
-    oversized = [partition for partition in partitions if partition.total_records > SEARCH_API_MAX_WINDOW]
-
-    if oversized:
-        labels = ", ".join(f"{p.label} ({p.total_records:,})" for p in oversized)
-        raise RuntimeError(
-            f"Species={target.key}: year partition(s) exceed search API window: {labels}"
-        )
+    partitions = split_oversized_year_partitions(target, partitions)
 
     partition_total = sum(partition.total_records for partition in partitions)
     log(
