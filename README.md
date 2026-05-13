@@ -43,8 +43,10 @@ Edit `SPECIES_TARGETS` in `alascraper.py` to fetch another species set. Prefer A
 - Default Parquet output with optional CSV output via `WRITE_CSV`.
 - Species-level and all-species merged outputs.
 - Per-species metadata and config fingerprints to prevent stale shard reuse when query, schema, code, or output settings change.
+- Normal research runs refresh all species by default with `FRESH_RUN = True`.
 - Stable ALA pagination settings plus UUID de-duplication during DuckDB merges.
 - Year-facet partitioning for uncapped full-dataset runs, avoiding ALA search-window truncation above 5,000 rows.
+- Strict page row-count validation before writing shards; short or empty ALA pages are retried and then rejected instead of stored.
 - Run logs and manifest files with elapsed timings and row counts.
 
 ## Data Governance Defaults
@@ -87,9 +89,13 @@ WORKERS = 12
 PAGE_SIZE = 500
 MAX_RECORDS_PER_SPECIES = None
 WRITE_CSV = False
-FRESH_RUN = False
+FRESH_RUN = True
 OUTPUT_ROOT = Path("outputs") / "ala_species_records"
 ```
+
+Normal research runs refresh all species by default with `FRESH_RUN = True`. Set it to `False` only when intentionally resuming the same query/config fingerprint.
+
+Capped runs currently support `MAX_RECORDS_PER_SPECIES = None` or values up to `5_000`. Larger caps are rejected until deterministic capped partitioning is implemented.
 
 For a small capped run, set:
 
