@@ -93,7 +93,7 @@ class KeywordSpeciesDiscovery:
 
 REPO_ROOT = Path(__file__).resolve().parent
 GENERATED_SPECIES_TARGETS_PATH = REPO_ROOT / "outputs" / "species_targets_generated.py"
-SPECIES_TARGETS_GENERATOR_SCRIPT = REPO_ROOT / "fetch_australian_butterfly_species.py"
+SPECIES_TARGETS_GENERATOR_SCRIPT = REPO_ROOT / "fetch_by_order.py"
 
 # Normal research runs refresh the ALA-backed scientific-name list first, then
 # import outputs.species_targets_generated.SPECIES_TARGETS.
@@ -520,11 +520,11 @@ def generate_species_targets_file(refresh: bool = REFRESH_SPECIES_TARGETS_BEFORE
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
 
-    module = importlib.import_module("fetch_australian_butterfly_species")
+    module = importlib.import_module("fetch_by_order")
 
     if not hasattr(module, "generate_species_targets"):
         raise AttributeError(
-            "fetch_australian_butterfly_species.py must define generate_species_targets()."
+            "fetch_by_order.py must define generate_species_targets()."
         )
 
     module.generate_species_targets()
@@ -534,7 +534,7 @@ def load_generated_species_targets() -> list[SpeciesTarget]:
     if not GENERATED_SPECIES_TARGETS_PATH.exists():
         raise FileNotFoundError(
             f"Missing generated species targets: {GENERATED_SPECIES_TARGETS_PATH}. "
-            "Run fetch_australian_butterfly_species.py first."
+            "Run fetch_by_order.py first."
         )
 
     if str(REPO_ROOT) not in sys.path:

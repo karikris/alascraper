@@ -21,8 +21,7 @@ pip install -r requirements.txt
 ```
 
 By default, `alascraper.py` refreshes the generated ALA-backed species target
-list from `fetch_australian_butterfly_species.py`, then fetches occurrences for
-each species.
+list from `fetch_by_order.py`, then fetches occurrences for each species.
 
 ## Call a Species Directly
 
