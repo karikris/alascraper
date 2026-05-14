@@ -1,6 +1,6 @@
 # alascraper
 
-Fetch Atlas of Living Australia occurrence records species by species.
+Fetch Atlas of Living Australia occurrence records by species.
 
 The default workflow writes Parquet outputs, uses DuckDB for merging, and keeps
 CSV disabled unless you explicitly enable it. Privacy-sensitive observer, source
