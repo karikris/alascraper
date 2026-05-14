@@ -116,6 +116,15 @@ Validate occurrence datasets against ALA, GBIF, and taxon-specific authority
 lists where needed. Use supplementary sources mainly to detect range extensions,
 recent spread, and under-sampled localities.
 
+## Ownership
+
+Authored by Kris Kari.
+
+Owned by the Global Change Ecology Lab, School of Biological Sciences, Monash
+University.
+
+Lab website: <https://shawanchowdhurylab.com/>
+
 ## Licence
 
 See `LICENSE`.
