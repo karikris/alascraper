@@ -25,6 +25,15 @@ list from `fetch_by_order.py`, then fetches occurrences for each species.
 `fetch_by_order.py` defaults to Australian ALA records in the order
 `Lepidoptera`.
 
+To choose the order at runtime and write both Parquet and CSV outputs:
+
+```bash
+python3 alascraper.py --order 'Lepidoptera' TRUE
+```
+
+Use `FALSE` or omit the final argument to keep CSV output disabled. The script
+name is `alascraper.py`.
+
 ## Generate Targets for Another Order
 
 Run the target generator directly when you want to build a reusable target list

@@ -32,8 +32,9 @@ Design:
 
 from __future__ import annotations
 
-import concurrent.futures as cf
+import argparse
 import atexit
+import concurrent.futures as cf
 import csv
 import hashlib
 import importlib
@@ -508,7 +509,11 @@ def coerce_species_target(value: SpeciesTarget | dict[str, Any]) -> SpeciesTarge
     )
 
 
-def generate_species_targets_file(refresh: bool = REFRESH_SPECIES_TARGETS_BEFORE_RUN) -> None:
+def generate_species_targets_file(
+    refresh: bool = REFRESH_SPECIES_TARGETS_BEFORE_RUN,
+    *,
+    order: str | None = None,
+) -> None:
     if GENERATED_SPECIES_TARGETS_PATH.exists() and not refresh:
         return
 
@@ -527,7 +532,10 @@ def generate_species_targets_file(refresh: bool = REFRESH_SPECIES_TARGETS_BEFORE
             "fetch_by_order.py must define generate_species_targets()."
         )
 
-    module.generate_species_targets()
+    if order is None:
+        module.generate_species_targets()
+    else:
+        module.generate_species_targets(order=order)
 
 
 def load_generated_species_targets() -> list[SpeciesTarget]:
@@ -567,13 +575,17 @@ def resolve_species_targets(
     species_targets: list[SpeciesTarget | dict[str, Any]] | None = None,
     *,
     refresh_generated_targets: bool = REFRESH_SPECIES_TARGETS_BEFORE_RUN,
+    generated_order: str | None = None,
 ) -> list[SpeciesTarget]:
     if species_targets is not None:
         targets = [coerce_species_target(target) for target in species_targets]
     elif SPECIES_TARGETS:
         targets = [coerce_species_target(target) for target in SPECIES_TARGETS]
     else:
-        generate_species_targets_file(refresh=refresh_generated_targets)
+        generate_species_targets_file(
+            refresh=refresh_generated_targets,
+            order=generated_order,
+        )
         targets = load_generated_species_targets()
 
     seen: set[str] = set()
@@ -1901,6 +1913,7 @@ def run_alascraper(
     keyword_targets: Mapping[str, Mapping[str, Any]] | None = None,
     write_csv: bool | None = None,
     refresh_generated_targets: bool = REFRESH_SPECIES_TARGETS_BEFORE_RUN,
+    order: str | None = None,
 ) -> int:
     global WRITE_CSV
 
@@ -1921,10 +1934,13 @@ def run_alascraper(
     else:
         active_targets = resolve_species_targets(
             refresh_generated_targets=refresh_generated_targets,
+            generated_order=order,
         )
 
     log("Starting ALA species-by-species occurrence fetch.")
     log(f"Python version: {sys.version.split()[0]}")
+    if order is not None:
+        log(f"Generated target order: {order}")
     log(f"Species targets: {len(active_targets):,}")
     log(f"Workers: {WORKERS}")
     log(f"Page size: {PAGE_SIZE}")
@@ -1950,8 +1966,49 @@ def run_alascraper(
     return 0
 
 
-def main() -> int:
-    return run_alascraper()
+def parse_bool(value: str) -> bool:
+    normalised = value.strip().lower()
+
+    if normalised in {"1", "true", "t", "yes", "y"}:
+        return True
+
+    if normalised in {"0", "false", "f", "no", "n"}:
+        return False
+
+    raise argparse.ArgumentTypeError(
+        "Expected TRUE or FALSE for optional CSV output flag."
+    )
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Fetch Atlas of Living Australia occurrence records species by species."
+    )
+    parser.add_argument(
+        "--order",
+        default=None,
+        help=(
+            "ALA order used to refresh generated species targets before the run, "
+            "for example Lepidoptera, Neuroptera, Diptera, or Mantodea."
+        ),
+    )
+    parser.add_argument(
+        "write_csv",
+        nargs="?",
+        type=parse_bool,
+        default=None,
+        metavar="WRITE_CSV",
+        help=(
+            "Optional TRUE/FALSE toggle for writing outputs/ala_species_records/"
+            "ala_species_records.csv alongside Parquet."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    return run_alascraper(order=args.order, write_csv=args.write_csv)
 
 
 if __name__ == "__main__":

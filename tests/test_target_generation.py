@@ -71,6 +71,69 @@ def test_resolve_species_targets_rejects_duplicate_keys() -> None:
         )
 
 
+def test_alascraper_cli_accepts_order_and_csv_toggle() -> None:
+    args = a.parse_args(["--order", "Lepidoptera", "TRUE"])
+
+    assert args.order == "Lepidoptera"
+    assert args.write_csv is True
+
+
+def test_alascraper_cli_defaults_csv_toggle_to_none() -> None:
+    args = a.parse_args(["--order", "Neuroptera"])
+
+    assert args.order == "Neuroptera"
+    assert args.write_csv is None
+
+
+def test_alascraper_main_passes_order_and_csv_toggle(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_alascraper(
+        *,
+        order: str | None,
+        write_csv: bool | None,
+        **kwargs: object,
+    ) -> int:
+        captured["order"] = order
+        captured["write_csv"] = write_csv
+        return 0
+
+    monkeypatch.setattr(a, "run_alascraper", fake_run_alascraper)
+
+    assert a.main(["--order", "Lepidoptera", "TRUE"]) == 0
+    assert captured == {"order": "Lepidoptera", "write_csv": True}
+
+
+def test_generate_species_targets_file_passes_order(monkeypatch, tmp_path) -> None:
+    captured: dict[str, str | None] = {}
+
+    class FakeGenerator:
+        @staticmethod
+        def generate_species_targets(order: str | None = None) -> None:
+            captured["order"] = order
+
+    monkeypatch.setattr(
+        a,
+        "GENERATED_SPECIES_TARGETS_PATH",
+        tmp_path / "species_targets_generated.py",
+    )
+    monkeypatch.setattr(
+        a,
+        "SPECIES_TARGETS_GENERATOR_SCRIPT",
+        tmp_path / "fetch_by_order.py",
+    )
+    a.SPECIES_TARGETS_GENERATOR_SCRIPT.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        a.importlib,
+        "import_module",
+        lambda module_name: FakeGenerator,
+    )
+
+    a.generate_species_targets_file(refresh=True, order="Mantodea")
+
+    assert captured == {"order": "Mantodea"}
+
+
 def test_fetch_by_order_cli_defaults_to_order_constant() -> None:
     args = generator.parse_args([])
 
