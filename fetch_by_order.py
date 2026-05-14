@@ -1,19 +1,20 @@
 #!/usr/bin/env python3.14
 """
-Fetch scientific names of Australian butterfly taxa from ALA occurrence facets.
+Fetch scientific names of Australian taxa for one order from ALA occurrence facets.
 
 Output:
-  outputs/australian_butterfly_species.csv
-  outputs/australian_butterfly_species.json
+  outputs/<order_key>_species.csv
+  outputs/<order_key>_species.json
   outputs/species_targets_generated.py
 
-This creates an occurrence-backed ALA list, not a static taxonomic monograph.
-Validate final taxonomy against Braby / Australian Faunal Directory for
-publication workflows.
+This creates an occurrence-backed ALA list for Australia-only records, not a
+static taxonomic monograph. Validate final taxonomy against GBIF and relevant
+taxon-specific authorities for publication workflows.
 """
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import re
@@ -30,25 +31,10 @@ import requests
 
 API_URL = "https://biocache-ws.ala.org.au/ws/occurrences/search"
 
+ORDER = "Lepidoptera"
+
 OUTPUT_DIR = Path("outputs")
-CSV_PATH = OUTPUT_DIR / "australian_butterfly_species.csv"
-JSON_PATH = OUTPUT_DIR / "australian_butterfly_species.json"
 PY_TARGETS_PATH = OUTPUT_DIR / "species_targets_generated.py"
-
-# Lepidoptera LSID from ALA / Australian Faunal Directory.
-LEPIDOPTERA_LSID = "https://biodiversity.org.au/afd/taxa/7cb6c81c-a7c4-4dd5-8578-fcfd2de847d6"
-
-# Braby-style Australian butterfly families:
-# Hesperioidea: Hesperiidae
-# Papilionoidea: Papilionidae, Pieridae, Nymphalidae, Riodinidae, Lycaenidae
-BUTTERFLY_FAMILIES = [
-    "Hesperiidae",
-    "Papilionidae",
-    "Pieridae",
-    "Nymphalidae",
-    "Riodinidae",
-    "Lycaenidae",
-]
 
 COUNTRY_FILTER = 'country:"Australia"'
 QUALITY_PROFILE = "ALA"
@@ -62,7 +48,7 @@ REQUEST_SLEEP_SECONDS = 0.3
 TIMEOUT_SECONDS = 60
 
 USER_AGENT = (
-    "Monash-Australian-butterfly-species-list/0.2 "
+    "Monash-ALA-order-species-list/0.3 "
     "(contact: replace-with-your-email@monash.edu)"
 )
 
@@ -86,6 +72,14 @@ def safe_key(scientific_name: str) -> str:
     return text.strip("_")
 
 
+def output_paths(order: str) -> tuple[Path, Path]:
+    order_key = safe_key(order)
+    return (
+        OUTPUT_DIR / f"{order_key}_species.csv",
+        OUTPUT_DIR / f"{order_key}_species.json",
+    )
+
+
 def is_probable_scientific_name(name: str) -> bool:
     """
     Keep species/subspecies-like names; exclude genus/family/order labels.
@@ -103,14 +97,17 @@ def is_probable_scientific_name(name: str) -> bool:
     if parts[0].lower() in {"not", "unknown", "unidentified"}:
         return False
 
-    return bool(re.match(r"^[A-Z][a-zA-Z-]+$", parts[0]))
+    if not re.match(r"^[A-Z][a-zA-Z-]+$", parts[0]):
+        return False
+
+    return all(re.match(r"^[a-z][a-z-]+$", part) for part in parts[1:])
 
 
-def build_params(family: str, facet_field: str) -> list[tuple[str, str | int]]:
+def build_params(order: str, facet_field: str) -> list[tuple[str, str | int]]:
     return [
-        ("q", f"lsid:{LEPIDOPTERA_LSID}"),
+        ("q", "*:*"),
         ("fq", COUNTRY_FILTER),
-        ("fq", f'family:"{family}"'),
+        ("fq", f'order:"{order}"'),
         ("qualityProfile", QUALITY_PROFILE),
         ("qc", QUALITY_CONTROL),
         ("pageSize", 0),
@@ -120,14 +117,14 @@ def build_params(family: str, facet_field: str) -> list[tuple[str, str | int]]:
     ]
 
 
-def fetch_family_taxa(
+def fetch_order_taxa(
     session: requests.Session,
-    family: str,
+    order: str,
     facet_field: str,
 ) -> list[dict[str, Any]]:
     response = session.get(
         API_URL,
-        params=build_params(family, facet_field),
+        params=build_params(order, facet_field),
         timeout=TIMEOUT_SECONDS,
     )
     response.raise_for_status()
@@ -154,7 +151,7 @@ def fetch_family_taxa(
                 {
                     "species_key": safe_key(scientific_name),
                     "scientific_name": scientific_name,
-                    "family": family,
+                    "order": order,
                     "facet_field": facet_field,
                     "ala_occurrence_count": count,
                     "ala_facet_fq": fq,
@@ -174,13 +171,13 @@ def merge_taxa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             merged[name] = {
                 "species_key": safe_key(name),
                 "scientific_name": name,
-                "families": set(),
+                "orders": set(),
                 "facet_fields": set(),
                 "ala_occurrence_count": 0,
                 "ala_facet_fq": set(),
             }
 
-        merged[name]["families"].add(row["family"])
+        merged[name]["orders"].add(row["order"])
         merged[name]["facet_fields"].add(row["facet_field"])
         merged[name]["ala_occurrence_count"] += row["ala_occurrence_count"]
 
@@ -194,26 +191,29 @@ def merge_taxa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "species_key": item["species_key"],
                 "scientific_name": item["scientific_name"],
-                "families": " | ".join(sorted(item["families"])),
+                "order": " | ".join(sorted(item["orders"])),
                 "facet_fields": " | ".join(sorted(item["facet_fields"])),
                 "ala_occurrence_count": item["ala_occurrence_count"],
                 "ala_facet_fq": " | ".join(sorted(item["ala_facet_fq"])),
             }
         )
 
-    return sorted(out, key=lambda x: (x["families"], x["scientific_name"]))
+    return sorted(
+        out,
+        key=lambda x: (x["order"], x["scientific_name"], x["species_key"]),
+    )
 
 
-def write_csv(rows: list[dict[str, Any]]) -> None:
-    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+def write_csv(rows: list[dict[str, Any]], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    with CSV_PATH.open("w", encoding="utf-8", newline="") as handle:
+    with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=[
                 "species_key",
                 "scientific_name",
-                "families",
+                "order",
                 "facet_fields",
                 "ala_occurrence_count",
                 "ala_facet_fq",
@@ -223,9 +223,9 @@ def write_csv(rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def write_json(rows: list[dict[str, Any]]) -> None:
-    JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
-    JSON_PATH.write_text(
+def write_json(rows: list[dict[str, Any]], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         json.dumps(rows, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
@@ -249,7 +249,7 @@ def write_python_targets(rows: list[dict[str, Any]]) -> None:
             "scientific_name": row["scientific_name"],
             "common_name": None,
             "taxon_lsid": None,
-            "families": row["families"],
+            "order": row["order"],
             "facet_fields": row["facet_fields"],
             "ala_occurrence_count": row["ala_occurrence_count"],
             "ala_facet_fq": row["ala_facet_fq"],
@@ -264,42 +264,64 @@ def write_python_targets(rows: list[dict[str, Any]]) -> None:
     PY_TARGETS_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
-def generate_species_targets() -> list[dict[str, Any]]:
+def generate_species_targets(order: str = ORDER) -> list[dict[str, Any]]:
+    order = order.strip()
+
+    if not order:
+        raise ValueError("Order must not be empty.")
+
     all_rows: list[dict[str, Any]] = []
 
     with requests.Session() as session:
         session.headers.update({"User-Agent": USER_AGENT})
 
-        for family in BUTTERFLY_FAMILIES:
-            for facet_field in FACET_FIELDS:
-                print(
-                    f"Fetching {facet_field} facet for family={family}",
-                    flush=True,
-                )
-                family_rows = fetch_family_taxa(session, family, facet_field)
-                print(
-                    f"  found {len(family_rows):,} {facet_field} names",
-                    flush=True,
-                )
-                all_rows.extend(family_rows)
-                time.sleep(REQUEST_SLEEP_SECONDS)
+        for facet_field in FACET_FIELDS:
+            print(
+                f"Fetching {facet_field} facet for order={order}",
+                flush=True,
+            )
+            order_rows = fetch_order_taxa(session, order, facet_field)
+            print(
+                f"  found {len(order_rows):,} {facet_field} names",
+                flush=True,
+            )
+            all_rows.extend(order_rows)
+            time.sleep(REQUEST_SLEEP_SECONDS)
 
     rows = merge_taxa(all_rows)
 
-    write_csv(rows)
-    write_json(rows)
+    if not rows:
+        raise ValueError(f"No valid ALA species targets found for order {order!r}.")
+
+    csv_path, json_path = output_paths(order)
+
+    write_csv(rows, csv_path)
+    write_json(rows, json_path)
     write_python_targets(rows)
 
-    print(f"\nUnique ALA-backed butterfly scientific names: {len(rows):,}")
-    print(f"Wrote: {CSV_PATH}")
-    print(f"Wrote: {JSON_PATH}")
+    print(f"\nUnique ALA-backed {order} scientific names: {len(rows):,}")
+    print(f"Wrote: {csv_path}")
+    print(f"Wrote: {json_path}")
     print(f"Wrote: {PY_TARGETS_PATH}")
 
     return rows
 
 
-def main() -> int:
-    generate_species_targets()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate ALA-backed species targets for one Australian order."
+    )
+    parser.add_argument(
+        "--order",
+        default=ORDER,
+        help=f"ALA order facet value to generate targets for. Default: {ORDER}",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    generate_species_targets(order=args.order)
     return 0
 
 

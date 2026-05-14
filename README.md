@@ -22,6 +22,23 @@ pip install -r requirements.txt
 
 By default, `alascraper.py` refreshes the generated ALA-backed species target
 list from `fetch_by_order.py`, then fetches occurrences for each species.
+`fetch_by_order.py` defaults to Australian ALA records in the order
+`Lepidoptera`.
+
+## Generate Targets for Another Order
+
+Run the target generator directly when you want to build a reusable target list
+for another ALA order before running the occurrence scraper.
+
+```bash
+.venv/bin/python fetch_by_order.py --order Neuroptera
+.venv/bin/python alascraper.py
+```
+
+The generator writes order-specific review files such as
+`outputs/neuroptera_species.csv` and `outputs/neuroptera_species.json`, plus the
+fixed `outputs/species_targets_generated.py` module consumed by
+`alascraper.py`.
 
 ## Call a Species Directly
 

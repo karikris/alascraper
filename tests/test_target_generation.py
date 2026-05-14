@@ -5,6 +5,7 @@ import sys
 import pytest
 
 import alascraper as a
+import fetch_by_order as generator
 
 
 def test_coerce_species_target_accepts_generated_dict() -> None:
@@ -68,3 +69,98 @@ def test_resolve_species_targets_rejects_duplicate_keys() -> None:
             ],
             refresh_generated_targets=False,
         )
+
+
+def test_fetch_by_order_cli_defaults_to_order_constant() -> None:
+    args = generator.parse_args([])
+
+    assert args.order == generator.ORDER
+
+
+def test_fetch_by_order_cli_accepts_order_override() -> None:
+    args = generator.parse_args(["--order", "Neuroptera"])
+
+    assert args.order == "Neuroptera"
+
+
+def test_build_params_queries_australian_order_facets() -> None:
+    params = generator.build_params("Neuroptera", "species")
+
+    assert ("q", "*:*") in params
+    assert ("fq", 'country:"Australia"') in params
+    assert ("fq", 'order:"Neuroptera"') in params
+    assert ("facets", "species") in params
+
+
+def test_merge_taxa_deduplicates_species_and_subspecies_rows() -> None:
+    rows = [
+        {
+            "species_key": "acacia_example",
+            "scientific_name": "Acacia example",
+            "order": "Fabales",
+            "facet_field": "species",
+            "ala_occurrence_count": 7,
+            "ala_facet_fq": 'species:"Acacia example"',
+        },
+        {
+            "species_key": "acacia_example",
+            "scientific_name": "Acacia example",
+            "order": "Fabales",
+            "facet_field": "subspecies",
+            "ala_occurrence_count": 3,
+            "ala_facet_fq": 'subspecies:"Acacia example"',
+        },
+    ]
+
+    merged = generator.merge_taxa(rows)
+
+    assert merged == [
+        {
+            "species_key": "acacia_example",
+            "scientific_name": "Acacia example",
+            "order": "Fabales",
+            "facet_fields": "species | subspecies",
+            "ala_occurrence_count": 10,
+            "ala_facet_fq": 'species:"Acacia example" | subspecies:"Acacia example"',
+        }
+    ]
+
+
+def test_write_python_targets_contains_species_targets(monkeypatch, tmp_path) -> None:
+    generated_path = tmp_path / "outputs" / "species_targets_generated.py"
+    monkeypatch.setattr(generator, "PY_TARGETS_PATH", generated_path)
+
+    generator.write_python_targets(
+        [
+            {
+                "species_key": "papilio_aegeus",
+                "scientific_name": "Papilio aegeus",
+                "order": "Lepidoptera",
+                "facet_fields": "species",
+                "ala_occurrence_count": 42,
+                "ala_facet_fq": 'species:"Papilio aegeus"',
+            }
+        ]
+    )
+
+    text = generated_path.read_text(encoding="utf-8")
+
+    assert "SPECIES_TARGETS = [" in text
+    assert "'key': 'papilio_aegeus'" in text
+    assert "'order': 'Lepidoptera'" in text
+
+
+def test_generate_species_targets_rejects_empty_valid_target_list(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(generator, "OUTPUT_DIR", tmp_path / "outputs")
+    monkeypatch.setattr(
+        generator,
+        "PY_TARGETS_PATH",
+        tmp_path / "outputs" / "species_targets_generated.py",
+    )
+    monkeypatch.setattr(generator, "REQUEST_SLEEP_SECONDS", 0)
+    monkeypatch.setattr(generator, "fetch_order_taxa", lambda session, order, facet_field: [])
+
+    with pytest.raises(ValueError, match="No valid ALA species targets found"):
+        generator.generate_species_targets(order="Neuroptera")
+
+    assert not (tmp_path / "outputs" / "species_targets_generated.py").exists()
