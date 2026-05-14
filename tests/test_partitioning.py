@@ -79,3 +79,149 @@ def test_oversized_year_partition_splits_by_month(
             total_records=2_646,
         ),
     ]
+
+
+def test_oversized_month_partition_splits_by_day(
+    monkeypatch,
+    target: a.SpeciesTarget,
+) -> None:
+    year_partition = a.QueryPartition(
+        label="year=2001",
+        extra_fq_filters=("year:2001",),
+        total_records=6_000,
+    )
+
+    monkeypatch.setattr(a, "fetch_year_facet_partitions", lambda _target: [year_partition])
+
+    def fake_fetch_facet_partitions(
+        _target: a.SpeciesTarget,
+        facet_field: str,
+        *,
+        base_label: str | None = None,
+        extra_fq_filters: tuple[str, ...] = (),
+    ) -> list[a.QueryPartition]:
+        if facet_field == "month":
+            assert base_label == "year=2001"
+            return [
+                a.QueryPartition(
+                    label="year=2001;month=January",
+                    extra_fq_filters=("year:2001", "month:January"),
+                    total_records=5_319,
+                ),
+                a.QueryPartition(
+                    label="year=2001;month=February",
+                    extra_fq_filters=("year:2001", "month:February"),
+                    total_records=681,
+                ),
+            ]
+
+        assert facet_field == "day"
+        assert base_label == "year=2001;month=January"
+        assert extra_fq_filters == ("year:2001", "month:January")
+        return [
+            a.QueryPartition(
+                label="year=2001;month=January;day=1",
+                extra_fq_filters=("year:2001", "month:January", "day:1"),
+                total_records=2_500,
+            ),
+            a.QueryPartition(
+                label="year=2001;month=January;day=2",
+                extra_fq_filters=("year:2001", "month:January", "day:2"),
+                total_records=2_819,
+            ),
+        ]
+
+    monkeypatch.setattr(a, "fetch_facet_partitions", fake_fetch_facet_partitions)
+
+    partitions = a.make_query_partitions(target, 6_000)
+
+    assert partitions == [
+        a.QueryPartition(
+            label="year=2001;month=January;day=1",
+            extra_fq_filters=("year:2001", "month:January", "day:1"),
+            total_records=2_500,
+        ),
+        a.QueryPartition(
+            label="year=2001;month=January;day=2",
+            extra_fq_filters=("year:2001", "month:January", "day:2"),
+            total_records=2_819,
+        ),
+        a.QueryPartition(
+            label="year=2001;month=February",
+            extra_fq_filters=("year:2001", "month:February"),
+            total_records=681,
+        ),
+    ]
+
+
+def test_oversized_day_partition_falls_back_to_lat_long(
+    monkeypatch,
+    target: a.SpeciesTarget,
+) -> None:
+    year_partition = a.QueryPartition(
+        label="year=2001",
+        extra_fq_filters=("year:2001",),
+        total_records=5_319,
+    )
+
+    monkeypatch.setattr(a, "fetch_year_facet_partitions", lambda _target: [year_partition])
+
+    def fake_fetch_facet_partitions(
+        _target: a.SpeciesTarget,
+        facet_field: str,
+        *,
+        base_label: str | None = None,
+        extra_fq_filters: tuple[str, ...] = (),
+        facet_limit: int = a.YEAR_FACET_LIMIT,
+    ) -> list[a.QueryPartition]:
+        if facet_field == "month":
+            return [
+                a.QueryPartition(
+                    label="year=2001;month=January",
+                    extra_fq_filters=("year:2001", "month:January"),
+                    total_records=5_319,
+                )
+            ]
+
+        if facet_field == "day":
+            return [
+                a.QueryPartition(
+                    label="year=2001;month=January;day=1",
+                    extra_fq_filters=("year:2001", "month:January", "day:1"),
+                    total_records=5_319,
+                )
+            ]
+
+        assert facet_field == "lat_long"
+        assert facet_limit == 5_319
+        assert base_label == "year=2001;month=January"
+        assert extra_fq_filters == ("year:2001", "month:January")
+        return [
+            a.QueryPartition(
+                label="year=2001;month=January;lat_long=-12,131",
+                extra_fq_filters=("year:2001", "month:January", "lat_long:-12,131"),
+                total_records=3_000,
+            ),
+            a.QueryPartition(
+                label="year=2001;month=January;lat_long=-13,132",
+                extra_fq_filters=("year:2001", "month:January", "lat_long:-13,132"),
+                total_records=2_319,
+            ),
+        ]
+
+    monkeypatch.setattr(a, "fetch_facet_partitions", fake_fetch_facet_partitions)
+
+    partitions = a.make_query_partitions(target, 5_319)
+
+    assert partitions == [
+        a.QueryPartition(
+            label="year=2001;month=January;lat_long=-12,131",
+            extra_fq_filters=("year:2001", "month:January", "lat_long:-12,131"),
+            total_records=3_000,
+        ),
+        a.QueryPartition(
+            label="year=2001;month=January;lat_long=-13,132",
+            extra_fq_filters=("year:2001", "month:January", "lat_long:-13,132"),
+            total_records=2_319,
+        ),
+    ]

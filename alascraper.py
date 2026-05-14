@@ -1171,6 +1171,22 @@ def config_fingerprint(config: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def resume_config(config: dict[str, Any]) -> dict[str, Any]:
+    comparable = dict(config)
+    comparable.pop("script_sha256", None)
+    return comparable
+
+
+def configs_equivalent_for_resume(
+    existing_config: Any,
+    current_config: dict[str, Any],
+) -> bool:
+    if not isinstance(existing_config, dict):
+        return False
+
+    return resume_config(existing_config) == resume_config(current_config)
+
+
 def read_species_metadata(target: SpeciesTarget) -> dict[str, Any] | None:
     path = species_metadata_path(target)
 
@@ -1214,12 +1230,23 @@ def prepare_species_output_for_config(target: SpeciesTarget) -> tuple[dict[str, 
     output_dir = species_dir(target)
 
     if output_dir.exists() and existing_fingerprint != fingerprint:
-        reason = "missing" if existing_fingerprint is None else "mismatched"
-        log(
-            f"Species={target.key}: clearing stale output directory "
-            f"because run metadata is {reason}."
+        existing_config = (
+            existing_metadata.get("config")
+            if isinstance(existing_metadata, dict)
+            else None
         )
-        shutil.rmtree(output_dir)
+
+        if configs_equivalent_for_resume(existing_config, config):
+            log(
+                f"Species={target.key}: reusing output directory; only script hash changed."
+            )
+        else:
+            reason = "missing" if existing_fingerprint is None else "mismatched"
+            log(
+                f"Species={target.key}: clearing stale output directory "
+                f"because run metadata is {reason}."
+            )
+            shutil.rmtree(output_dir)
 
     write_species_metadata(target, config, fingerprint)
     return config, fingerprint
@@ -1336,6 +1363,7 @@ def fetch_facet_partitions(
     *,
     base_label: str | None = None,
     extra_fq_filters: tuple[str, ...] = (),
+    facet_limit: int = YEAR_FACET_LIMIT,
 ) -> list[QueryPartition]:
     params: list[tuple[str, str | int]] = [
         ("q", build_query(target)),
@@ -1347,7 +1375,7 @@ def fetch_facet_partitions(
         ("dir", ALA_SORT_DIRECTION),
         ("facet", "true"),
         ("facets", facet_field),
-        ("flimit", YEAR_FACET_LIMIT),
+        ("flimit", facet_limit),
     ]
 
     for fq in [*build_fq_filters(target), *extra_fq_filters]:
@@ -1411,25 +1439,85 @@ def split_oversized_year_partitions(
                 "and has no month facets."
             )
 
-        oversized_months = [
-            month_partition
-            for month_partition in month_partitions
-            if month_partition.total_records > SEARCH_API_MAX_WINDOW
-        ]
+        split_partitions: list[QueryPartition] = []
 
-        if oversized_months:
-            labels = ", ".join(
-                f"{p.label} ({p.total_records:,})" for p in oversized_months
-            )
-            raise RuntimeError(
-                f"Species={target.key}: month partition(s) exceed search API window: {labels}"
+        for month_partition in month_partitions:
+            if month_partition.total_records <= SEARCH_API_MAX_WINDOW:
+                split_partitions.append(month_partition)
+                continue
+
+            day_partitions = fetch_facet_partitions(
+                target,
+                "day",
+                base_label=month_partition.label,
+                extra_fq_filters=month_partition.extra_fq_filters,
             )
 
-        month_total = sum(month_partition.total_records for month_partition in month_partitions)
+            if not day_partitions:
+                raise RuntimeError(
+                    f"Species={target.key}: {month_partition.label} exceeds "
+                    "search API window and has no day facets."
+                )
+
+            oversized_days = [
+                day_partition
+                for day_partition in day_partitions
+                if day_partition.total_records > SEARCH_API_MAX_WINDOW
+            ]
+
+            if oversized_days:
+                lat_long_partitions = fetch_facet_partitions(
+                    target,
+                    "lat_long",
+                    base_label=month_partition.label,
+                    extra_fq_filters=month_partition.extra_fq_filters,
+                    facet_limit=max(month_partition.total_records, YEAR_FACET_LIMIT),
+                )
+
+                lat_long_total = sum(
+                    partition.total_records for partition in lat_long_partitions
+                )
+
+                if lat_long_total == month_partition.total_records and all(
+                    partition.total_records <= SEARCH_API_MAX_WINDOW
+                    for partition in lat_long_partitions
+                ):
+                    log(
+                        f"Species={target.key}: split oversized {month_partition.label} "
+                        f"({month_partition.total_records:,}) into "
+                        f"{len(lat_long_partitions):,} lat_long partitions."
+                    )
+                    split_partitions.extend(lat_long_partitions)
+                    continue
+
+                labels = ", ".join(
+                    f"{p.label} ({p.total_records:,})" for p in oversized_days
+                )
+                raise RuntimeError(
+                    f"Species={target.key}: day partition(s) exceed "
+                    f"search API window: {labels}"
+                )
+
+            day_total = sum(day_partition.total_records for day_partition in day_partitions)
+
+            if day_total != month_partition.total_records:
+                raise RuntimeError(
+                    f"Species={target.key}: day partitions for {month_partition.label} "
+                    f"sum to {day_total:,}, expected {month_partition.total_records:,}."
+                )
+
+            log(
+                f"Species={target.key}: split oversized {month_partition.label} "
+                f"({month_partition.total_records:,}) into {len(day_partitions):,} "
+                "day partitions."
+            )
+            split_partitions.extend(day_partitions)
+
+        month_total = sum(partition.total_records for partition in split_partitions)
 
         if month_total != partition.total_records:
             raise RuntimeError(
-                f"Species={target.key}: month partitions for {partition.label} "
+                f"Species={target.key}: split partitions for {partition.label} "
                 f"sum to {month_total:,}, expected {partition.total_records:,}."
             )
 
@@ -1437,7 +1525,7 @@ def split_oversized_year_partitions(
             f"Species={target.key}: split oversized {partition.label} "
             f"({partition.total_records:,}) into {len(month_partitions):,} month partitions."
         )
-        out.extend(month_partitions)
+        out.extend(split_partitions)
 
     return out
 

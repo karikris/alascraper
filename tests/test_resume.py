@@ -23,3 +23,18 @@ def test_mismatched_metadata_deletes_species_output(monkeypatch, isolated_output
 
     assert not sentinel.exists()
     assert a.species_metadata_path(target).exists()
+
+
+def test_script_hash_only_change_retains_species_output(
+    monkeypatch,
+    isolated_outputs,
+    target: a.SpeciesTarget,
+) -> None:
+    a.prepare_species_output_for_config(target)
+    sentinel = a.species_dir(target) / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    monkeypatch.setattr(a, "script_sha256", lambda: "changed")
+    a.prepare_species_output_for_config(target)
+
+    assert sentinel.exists()
