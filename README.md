@@ -21,18 +21,24 @@ pip install -r requirements.txt
 ```
 
 By default, `alascraper.py` refreshes the generated ALA-backed species target
-list from `fetch_by_order.py`, then fetches occurrences for each species.
-`fetch_by_order.py` defaults to Australian ALA records in the order
+list from `scripts/fetch_by_order.py`, then fetches occurrences for each
+species. `scripts/fetch_by_order.py` defaults to Australian ALA records in the order
 `Lepidoptera`.
 
 To choose the order at runtime and write both Parquet and CSV outputs:
 
 ```bash
-python3 alascraper.py --order 'Lepidoptera' TRUE
+python3 alascraper.py --class insecta --order 'Lepidoptera' TRUE
 ```
 
-Use `FALSE` or omit the final argument to keep CSV output disabled. The script
-name is `alascraper.py`.
+Use `FALSE` or omit the final argument to keep CSV output disabled. If
+`--class` is omitted, the run writes under `datasets/misc/<order>/`.
+
+For Poales:
+
+```bash
+python3 alascraper.py --class monocot --order 'Poales' TRUE
+```
 
 ## Generate Targets for Another Order
 
@@ -40,14 +46,16 @@ Run the target generator directly when you want to build a reusable target list
 for another ALA order before running the occurrence scraper.
 
 ```bash
-.venv/bin/python fetch_by_order.py --order Neuroptera
-.venv/bin/python alascraper.py
+.venv/bin/python scripts/fetch_by_order.py \
+  --order Neuroptera \
+  --output-dir datasets/insecta/neuroptera
+.venv/bin/python alascraper.py --class insecta --order Neuroptera
 ```
 
 The generator writes order-specific review files such as
-`outputs/neuroptera_species.csv` and `outputs/neuroptera_species.json`, plus the
-fixed `outputs/species_targets_generated.py` module consumed by
-`alascraper.py`.
+`datasets/insecta/neuroptera/neuroptera_species.csv` and
+`datasets/insecta/neuroptera/neuroptera_species.json`, plus the dataset-local
+`species_targets_generated.py` module consumed by `alascraper.py`.
 
 ## Call a Species Directly
 
@@ -102,7 +110,7 @@ WORKERS = 12
 MAX_RECORDS_PER_SPECIES = None
 WRITE_CSV = False
 FRESH_RUN = False
-OUTPUT_ROOT = Path("outputs") / "ala_species_records"
+DATASETS_ROOT = Path("datasets")
 ```
 
 Set `MAX_RECORDS_PER_SPECIES` to a small number for test runs. Leave it as
@@ -110,13 +118,16 @@ Set `MAX_RECORDS_PER_SPECIES` to a small number for test runs. Leave it as
 
 ## Outputs
 
-Default output directory:
+Default dataset output directory:
 
 ```text
-outputs/ala_species_records/
+datasets/<class_or_misc>/<order>/
 ├── ala_species_records.parquet
 ├── ala_species_records.csv          # only when WRITE_CSV = True
 ├── ala_species_records.duckdb
+├── <order>_species.csv
+├── <order>_species.json
+├── species_targets_generated.py
 ├── run_log.txt
 ├── species_manifest.csv
 └── species/

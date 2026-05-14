@@ -5,7 +5,7 @@ Fetch ALA occurrence records species-by-species.
 Python: 3.14+
 
 Default output:
-  outputs/ala_species_records/
+  datasets/misc/lepidoptera/
     ├── species/
     │   ├── papilio_aegeus/
     │   │   ├── shards/page_000000.parquet
@@ -38,6 +38,7 @@ import concurrent.futures as cf
 import csv
 import hashlib
 import importlib
+import importlib.util
 import json
 import math
 import os
@@ -93,11 +94,15 @@ class KeywordSpeciesDiscovery:
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-GENERATED_SPECIES_TARGETS_PATH = REPO_ROOT / "outputs" / "species_targets_generated.py"
-SPECIES_TARGETS_GENERATOR_SCRIPT = REPO_ROOT / "fetch_by_order.py"
+GENERATED_SPECIES_TARGETS_PATH = (
+    REPO_ROOT / "datasets" / "misc" / "lepidoptera" / "species_targets_generated.py"
+)
+SPECIES_TARGETS_GENERATOR_SCRIPT = REPO_ROOT / "scripts" / "fetch_by_order.py"
+SPECIES_TARGETS_GENERATOR_MODULE = "scripts.fetch_by_order"
+DEFAULT_GENERATED_ORDER = "Lepidoptera"
 
 # Normal research runs refresh the ALA-backed scientific-name list first, then
-# import outputs.species_targets_generated.SPECIES_TARGETS.
+# import the dataset-local species_targets_generated.py.
 REFRESH_SPECIES_TARGETS_BEFORE_RUN = True
 
 # Optional fallback for programmatic/custom runs. The default main workflow uses
@@ -261,7 +266,8 @@ INCLUDE_USER_DATA_FIELDS = False
 # If False, existing shard files are reused.
 FRESH_RUN = False
 
-OUTPUT_ROOT = Path("outputs") / "ala_species_records"
+DATASETS_ROOT = Path("datasets")
+OUTPUT_ROOT = DATASETS_ROOT / "misc" / "lepidoptera"
 SPECIES_ROOT = OUTPUT_ROOT / "species"
 FINAL_ALL_SPECIES_PARQUET = OUTPUT_ROOT / "ala_species_records.parquet"
 FINAL_ALL_SPECIES_CSV = OUTPUT_ROOT / "ala_species_records.csv"
@@ -468,6 +474,36 @@ def safe_key(text: str) -> str:
     return text.strip("_")
 
 
+def dataset_output_root(order: str | None, dataset_class: str | None) -> Path:
+    class_key = safe_key(dataset_class or "") or "misc"
+    order_key = safe_key(order or DEFAULT_GENERATED_ORDER)
+
+    if not order_key:
+        raise ValueError("Order must not be empty.")
+
+    return DATASETS_ROOT / class_key / order_key
+
+
+def configure_output_root(output_root: Path) -> None:
+    global OUTPUT_ROOT
+    global SPECIES_ROOT
+    global FINAL_ALL_SPECIES_PARQUET
+    global FINAL_ALL_SPECIES_CSV
+    global DUCKDB_PATH
+    global RUN_LOG_PATH
+    global MANIFEST_PATH
+    global GENERATED_SPECIES_TARGETS_PATH
+
+    OUTPUT_ROOT = output_root
+    SPECIES_ROOT = OUTPUT_ROOT / "species"
+    FINAL_ALL_SPECIES_PARQUET = OUTPUT_ROOT / "ala_species_records.parquet"
+    FINAL_ALL_SPECIES_CSV = OUTPUT_ROOT / "ala_species_records.csv"
+    DUCKDB_PATH = OUTPUT_ROOT / "ala_species_records.duckdb"
+    RUN_LOG_PATH = OUTPUT_ROOT / "run_log.txt"
+    MANIFEST_PATH = OUTPUT_ROOT / "species_manifest.csv"
+    GENERATED_SPECIES_TARGETS_PATH = OUTPUT_ROOT / "species_targets_generated.py"
+
+
 def is_probable_scientific_name(name: str) -> bool:
     text = name.strip()
     parts = text.split()
@@ -525,42 +561,43 @@ def generate_species_targets_file(
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
 
-    module = importlib.import_module("fetch_by_order")
+    module = importlib.import_module(SPECIES_TARGETS_GENERATOR_MODULE)
 
     if not hasattr(module, "generate_species_targets"):
         raise AttributeError(
-            "fetch_by_order.py must define generate_species_targets()."
+            "scripts/fetch_by_order.py must define generate_species_targets()."
         )
 
     if order is None:
-        module.generate_species_targets()
+        module.generate_species_targets(output_dir=OUTPUT_ROOT)
     else:
-        module.generate_species_targets(order=order)
+        module.generate_species_targets(order=order, output_dir=OUTPUT_ROOT)
 
 
 def load_generated_species_targets() -> list[SpeciesTarget]:
     if not GENERATED_SPECIES_TARGETS_PATH.exists():
         raise FileNotFoundError(
             f"Missing generated species targets: {GENERATED_SPECIES_TARGETS_PATH}. "
-            "Run fetch_by_order.py first."
+            "Run scripts/fetch_by_order.py first."
         )
 
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
+    module_name = f"species_targets_generated_{safe_key(str(GENERATED_SPECIES_TARGETS_PATH))}"
+    spec = importlib.util.spec_from_file_location(module_name, GENERATED_SPECIES_TARGETS_PATH)
 
-    importlib.invalidate_caches()
-    module_name = "outputs.species_targets_generated"
+    if spec is None or spec.loader is None:
+        raise ImportError(
+            f"Could not import generated species targets: {GENERATED_SPECIES_TARGETS_PATH}"
+        )
 
-    if module_name in sys.modules:
-        module = importlib.reload(sys.modules[module_name])
-    else:
-        module = importlib.import_module(module_name)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
 
     generated_targets = getattr(module, "SPECIES_TARGETS", None)
 
     if generated_targets is None:
         raise AttributeError(
-            "outputs.species_targets_generated must define SPECIES_TARGETS."
+            f"{GENERATED_SPECIES_TARGETS_PATH} must define SPECIES_TARGETS."
         )
 
     targets = [coerce_species_target(target) for target in generated_targets]
@@ -1914,11 +1951,14 @@ def run_alascraper(
     write_csv: bool | None = None,
     refresh_generated_targets: bool = REFRESH_SPECIES_TARGETS_BEFORE_RUN,
     order: str | None = None,
+    dataset_class: str | None = None,
 ) -> int:
     global WRITE_CSV
 
     if write_csv is not None:
         WRITE_CSV = write_csv
+
+    configure_output_root(dataset_output_root(order, dataset_class))
 
     run_started = time.perf_counter()
     validate_privacy_settings()
@@ -1939,6 +1979,8 @@ def run_alascraper(
 
     log("Starting ALA species-by-species occurrence fetch.")
     log(f"Python version: {sys.version.split()[0]}")
+    log(f"Dataset output root: {OUTPUT_ROOT}")
+    log(f"Dataset class: {dataset_class or 'misc'}")
     if order is not None:
         log(f"Generated target order: {order}")
     log(f"Species targets: {len(active_targets):,}")
@@ -1993,14 +2035,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--class",
+        dest="dataset_class",
+        default=None,
+        help=(
+            "Dataset class/group folder name under datasets/. "
+            "If omitted, results go under datasets/misc/."
+        ),
+    )
+    parser.add_argument(
         "write_csv",
         nargs="?",
         type=parse_bool,
         default=None,
         metavar="WRITE_CSV",
         help=(
-            "Optional TRUE/FALSE toggle for writing outputs/ala_species_records/"
-            "ala_species_records.csv alongside Parquet."
+            "Optional TRUE/FALSE toggle for writing ala_species_records.csv "
+            "alongside Parquet in the dataset folder."
         ),
     )
     return parser.parse_args(argv)
@@ -2008,7 +2059,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    return run_alascraper(order=args.order, write_csv=args.write_csv)
+    return run_alascraper(
+        order=args.order,
+        dataset_class=args.dataset_class,
+        write_csv=args.write_csv,
+    )
 
 
 if __name__ == "__main__":

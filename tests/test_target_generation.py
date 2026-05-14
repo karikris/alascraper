@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import sys
-
 import pytest
 
 import alascraper as a
-import fetch_by_order as generator
+import scripts.fetch_by_order as generator
 
 
 def test_coerce_species_target_accepts_generated_dict() -> None:
@@ -31,10 +29,9 @@ def test_coerce_species_target_rejects_missing_scientific_name() -> None:
 
 
 def test_load_generated_species_targets_imports_generated_module(monkeypatch, tmp_path) -> None:
-    outputs_dir = tmp_path / "outputs"
-    outputs_dir.mkdir()
-    (outputs_dir / "__init__.py").write_text("", encoding="utf-8")
-    generated_path = outputs_dir / "species_targets_generated.py"
+    dataset_dir = tmp_path / "datasets" / "insecta" / "lepidoptera"
+    dataset_dir.mkdir(parents=True)
+    generated_path = dataset_dir / "species_targets_generated.py"
     generated_path.write_text(
         "SPECIES_TARGETS = ["
         "{'key': 'papilio_aegeus', 'scientific_name': 'Papilio aegeus', "
@@ -43,8 +40,6 @@ def test_load_generated_species_targets_imports_generated_module(monkeypatch, tm
         encoding="utf-8",
     )
 
-    sys.modules.pop("outputs.species_targets_generated", None)
-    sys.modules.pop("outputs", None)
     monkeypatch.setattr(a, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(a, "GENERATED_SPECIES_TARGETS_PATH", generated_path)
 
@@ -72,8 +67,9 @@ def test_resolve_species_targets_rejects_duplicate_keys() -> None:
 
 
 def test_alascraper_cli_accepts_order_and_csv_toggle() -> None:
-    args = a.parse_args(["--order", "Lepidoptera", "TRUE"])
+    args = a.parse_args(["--class", "insecta", "--order", "Lepidoptera", "TRUE"])
 
+    assert args.dataset_class == "insecta"
     assert args.order == "Lepidoptera"
     assert args.write_csv is True
 
@@ -85,23 +81,41 @@ def test_alascraper_cli_defaults_csv_toggle_to_none() -> None:
     assert args.write_csv is None
 
 
+def test_dataset_output_root_uses_class_and_order() -> None:
+    assert a.dataset_output_root("Poales", "monocot") == (
+        a.DATASETS_ROOT / "monocot" / "poales"
+    )
+
+
+def test_dataset_output_root_defaults_missing_class_to_misc() -> None:
+    assert a.dataset_output_root("Poales", None) == (
+        a.DATASETS_ROOT / "misc" / "poales"
+    )
+
+
 def test_alascraper_main_passes_order_and_csv_toggle(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_run_alascraper(
         *,
         order: str | None,
+        dataset_class: str | None,
         write_csv: bool | None,
         **kwargs: object,
     ) -> int:
         captured["order"] = order
+        captured["dataset_class"] = dataset_class
         captured["write_csv"] = write_csv
         return 0
 
     monkeypatch.setattr(a, "run_alascraper", fake_run_alascraper)
 
-    assert a.main(["--order", "Lepidoptera", "TRUE"]) == 0
-    assert captured == {"order": "Lepidoptera", "write_csv": True}
+    assert a.main(["--class", "insecta", "--order", "Lepidoptera", "TRUE"]) == 0
+    assert captured == {
+        "order": "Lepidoptera",
+        "dataset_class": "insecta",
+        "write_csv": True,
+    }
 
 
 def test_generate_species_targets_file_passes_order(monkeypatch, tmp_path) -> None:
@@ -109,8 +123,13 @@ def test_generate_species_targets_file_passes_order(monkeypatch, tmp_path) -> No
 
     class FakeGenerator:
         @staticmethod
-        def generate_species_targets(order: str | None = None) -> None:
+        def generate_species_targets(
+            order: str | None = None,
+            *,
+            output_dir: object | None = None,
+        ) -> None:
             captured["order"] = order
+            captured["output_dir"] = str(output_dir)
 
     monkeypatch.setattr(
         a,
@@ -131,7 +150,10 @@ def test_generate_species_targets_file_passes_order(monkeypatch, tmp_path) -> No
 
     a.generate_species_targets_file(refresh=True, order="Mantodea")
 
-    assert captured == {"order": "Mantodea"}
+    assert captured == {
+        "order": "Mantodea",
+        "output_dir": str(a.OUTPUT_ROOT),
+    }
 
 
 def test_fetch_by_order_cli_defaults_to_order_constant() -> None:
@@ -189,9 +211,10 @@ def test_merge_taxa_deduplicates_species_and_subspecies_rows() -> None:
     ]
 
 
-def test_write_python_targets_contains_species_targets(monkeypatch, tmp_path) -> None:
-    generated_path = tmp_path / "outputs" / "species_targets_generated.py"
-    monkeypatch.setattr(generator, "PY_TARGETS_PATH", generated_path)
+def test_write_python_targets_contains_species_targets(tmp_path) -> None:
+    generated_path = (
+        tmp_path / "datasets" / "insecta" / "lepidoptera" / "species_targets_generated.py"
+    )
 
     generator.write_python_targets(
         [
@@ -203,7 +226,8 @@ def test_write_python_targets_contains_species_targets(monkeypatch, tmp_path) ->
                 "ala_occurrence_count": 42,
                 "ala_facet_fq": 'species:"Papilio aegeus"',
             }
-        ]
+        ],
+        generated_path,
     )
 
     text = generated_path.read_text(encoding="utf-8")
@@ -214,16 +238,11 @@ def test_write_python_targets_contains_species_targets(monkeypatch, tmp_path) ->
 
 
 def test_generate_species_targets_rejects_empty_valid_target_list(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(generator, "OUTPUT_DIR", tmp_path / "outputs")
-    monkeypatch.setattr(
-        generator,
-        "PY_TARGETS_PATH",
-        tmp_path / "outputs" / "species_targets_generated.py",
-    )
+    output_dir = tmp_path / "datasets" / "monocot" / "poales"
     monkeypatch.setattr(generator, "REQUEST_SLEEP_SECONDS", 0)
     monkeypatch.setattr(generator, "fetch_order_taxa", lambda session, order, facet_field: [])
 
     with pytest.raises(ValueError, match="No valid ALA species targets found"):
-        generator.generate_species_targets(order="Neuroptera")
+        generator.generate_species_targets(order="Neuroptera", output_dir=output_dir)
 
-    assert not (tmp_path / "outputs" / "species_targets_generated.py").exists()
+    assert not (output_dir / "species_targets_generated.py").exists()
