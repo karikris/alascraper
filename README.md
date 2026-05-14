@@ -1,75 +1,12 @@
 # alascraper
 
-`alascraper` is a Python 3.14 workflow for fetching Atlas of Living Australia (ALA) occurrence records species by species. It is designed as a reusable scraper for different taxa, species sets, and ALA-backed data providers, with fast parallel fetching, privacy-conscious default outputs, and efficient local storage in Parquet, DuckDB, and optional CSV formats.
+Fetch Atlas of Living Australia occurrence records species by species.
 
-## Ownership
+The default workflow writes Parquet outputs, uses DuckDB for merging, and keeps
+CSV disabled unless you explicitly enable it. Privacy-sensitive observer, source
+link, comment, and image fields are excluded by default.
 
-This project is authored by **Kris Kari** and owned by the **Global Change Ecology Lab, School of Biological Sciences, Monash University**.
-
-Lab website: <https://shawanchowdhurylab.com/>
-
-## Purpose
-
-The script supports reproducible species occurrence studies by building datasets from ALA-backed biodiversity records. It can be repurposed for different species groups and provider filters while keeping the same fetch, normalisation, and output pipeline. Example source families include:
-
-- ALA biodiversity records for configured taxa
-- iNaturalist Australia records available through ALA
-- Specialist provider datasets represented in ALA
-- Additional ALA data resources selected through query/filter constants
-
-The workflow is species-by-species so `SPECIES_TARGETS` can be edited and reused for different taxa, regions, or ALA data-resource filters.
-
-## Current Script
-
-Main entry point:
-
-```bash
-python alascraper.py
-```
-
-For the Australian butterfly workflow, `alascraper.py` first refreshes the ALA-backed scientific-name list by running `fetch_australian_butterfly_species.py`, then imports:
-
-```python
-from outputs.species_targets_generated import SPECIES_TARGETS
-```
-
-The generated targets are used as the species-by-species query list. Prefer ALA taxon LSIDs where available for stricter taxonomy. Add provider, region, or quality filters through the query constants rather than hard-coding them in output logic.
-
-The generated list is occurrence-backed, not a static taxonomic monograph. Validate publication taxonomy against Braby / Australian Faunal Directory where needed.
-
-## Features
-
-- Python 3.14 project using `polars`, `duckdb`, `requests`, and Parquet.
-- Parallel page fetching with `WORKERS = 12`, suitable for a high-core desktop CPU.
-- Thread-local HTTP sessions for connection reuse without sharing a `requests.Session` across worker threads.
-- Default Parquet output with optional CSV output via `WRITE_CSV`.
-- Species-level and all-species merged outputs.
-- Per-species metadata and config fingerprints to prevent stale shard reuse when query, schema, code, or output settings change.
-- Stable ALA pagination settings plus UUID de-duplication during DuckDB merges.
-- Year-facet partitioning for uncapped full-dataset runs, avoiding ALA search-window truncation above 5,000 rows.
-- Run logs and manifest files with elapsed timings and row counts.
-
-## Data Governance Defaults
-
-The script is privacy-minimised by default.
-
-`INCLUDE_USER_DATA_FIELDS = False` excludes observer/user and source-link fields such as:
-
-- `recordedBy`
-- `collectors`
-- `collector`
-- `occurrenceID`
-- `references`
-- `occurrenceDetails`
-- image identifiers and image URLs
-
-`WRITE_RAW_PAGE_JSON = False` is also the default. If raw page JSON is enabled without also enabling user-data fields, the script raises an error because raw ALA responses can contain observer names, source observation links, and media identifiers.
-
-Do not enable these fields unless ethics approval explicitly covers storage of observer/user data and source-linked media metadata.
-
-## Installation
-
-Create and activate a Python 3.14 virtual environment:
+## Install
 
 ```bash
 python3.14 -m venv .venv
@@ -77,64 +14,76 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The local `.venv/`, generated outputs, DuckDB files, Parquet files, and CSV files are ignored by Git.
+## Run the Default Workflow
 
-## Configuration
+```bash
+.venv/bin/python alascraper.py
+```
 
-Common constants in `alascraper.py`:
+By default, `alascraper.py` refreshes the generated ALA-backed species target
+list from `fetch_australian_butterfly_species.py`, then fetches occurrences for
+each species.
+
+## Call a Species Directly
+
+Use `run_alascraper()` when you want to fetch one species or provide your own
+species list without editing generated files.
+
+```bash
+.venv/bin/python -c "import alascraper as a; raise SystemExit(a.run_alascraper(species_targets=[{'key': 'papilio_aegeus', 'scientific_name': 'Papilio aegeus'}], write_csv=False, refresh_generated_targets=False))"
+```
+
+Prefer an ALA taxon LSID when you have one:
+
+```bash
+.venv/bin/python -c "import alascraper as a; raise SystemExit(a.run_alascraper(species_targets=[{'key': 'papilio_aegeus', 'scientific_name': 'Papilio aegeus', 'taxon_lsid': 'ALA_TAXON_LSID_HERE'}], write_csv=False, refresh_generated_targets=False))"
+```
+
+For repeated use, pass a list:
 
 ```python
-REFRESH_SPECIES_TARGETS_BEFORE_RUN = True
+import alascraper as a
+
+targets = [
+    {
+        "key": "papilio_aegeus",
+        "scientific_name": "Papilio aegeus",
+        "common_name": "Orchard Swallowtail",
+    },
+    {
+        "key": "danaus_plexippus",
+        "scientific_name": "Danaus plexippus",
+        "common_name": "Monarch",
+    },
+]
+
+raise SystemExit(
+    a.run_alascraper(
+        species_targets=targets,
+        write_csv=False,
+        refresh_generated_targets=False,
+    )
+)
+```
+
+`key` should be short, lowercase, filesystem-safe, and unique.
+
+## Useful Constants
+
+Edit these in `alascraper.py` for normal runs:
+
+```python
 WORKERS = 12
-PAGE_SIZE = 500
 MAX_RECORDS_PER_SPECIES = None
 WRITE_CSV = False
 FRESH_RUN = False
 OUTPUT_ROOT = Path("outputs") / "ala_species_records"
 ```
 
-To run with explicit targets instead of the generated butterfly list:
+Set `MAX_RECORDS_PER_SPECIES` to a small number for test runs. Leave it as
+`None` for full species exports.
 
-```python
-import alascraper as a
-
-a.run_alascraper(
-    species_targets=[
-        {"key": "papilio_aegeus", "scientific_name": "Papilio aegeus"},
-    ],
-    write_csv=False,
-    refresh_generated_targets=False,
-)
-```
-
-To use the keyword discovery workflow directly:
-
-```python
-import alascraper as a
-
-a.run_alascraper(
-    keyword_targets=a.KEYWORD_TARGETS,
-    write_csv=False,
-)
-```
-
-For a small capped run, set:
-
-```python
-MAX_RECORDS_PER_SPECIES = 5_000
-WRITE_CSV = True
-FRESH_RUN = True
-```
-
-For a full run, set:
-
-```python
-MAX_RECORDS_PER_SPECIES = None
-WRITE_CSV = True
-FRESH_RUN = True
-```
-
-## Output Layout
+## Outputs
 
 Default output directory:
 
@@ -147,36 +96,26 @@ outputs/ala_species_records/
 ├── species_manifest.csv
 └── species/
     └── <species_key>/
-        ├── run_metadata.json
         ├── <species_key>.parquet
+        ├── run_metadata.json
         └── shards/
             └── page_000000.parquet
 ```
 
-`run_log.txt` records progress, row counts, de-duplication counts, and elapsed durations. `species_manifest.csv` records each species query, filters, row counts, output path, config fingerprint, and elapsed time.
+## Privacy Defaults
 
-## Example: 5,000-Row-Per-Species CSV Run
+`INCLUDE_USER_DATA_FIELDS = False` omits observer/user and source-linked fields.
+`WRITE_RAW_PAGE_JSON = False` avoids storing raw ALA responses.
 
-From Python, override runtime constants without editing the source file:
+Do not enable these unless ethics approval explicitly covers storing usernames,
+profile/source links, comments, or media metadata.
 
-```bash
-.venv/bin/python -c "import alascraper as a; root=a.Path('outputs') / 'ala_species_records_5000'; a.OUTPUT_ROOT=root; a.SPECIES_ROOT=root / 'species'; a.FINAL_ALL_SPECIES_PARQUET=root / 'ala_species_records.parquet'; a.FINAL_ALL_SPECIES_CSV=root / 'ala_species_records.csv'; a.DUCKDB_PATH=root / 'ala_species_records.duckdb'; a.RUN_LOG_PATH=root / 'run_log.txt'; a.MANIFEST_PATH=root / 'species_manifest.csv'; a.MAX_RECORDS_PER_SPECIES=5000; a.WRITE_CSV=True; a.FRESH_RUN=True; raise SystemExit(a.main())"
-```
+## Validation
 
-## Example: Full Dataset CSV Run
-
-```bash
-.venv/bin/python -c "import alascraper as a; root=a.Path('outputs') / 'ala_species_records_full'; a.OUTPUT_ROOT=root; a.SPECIES_ROOT=root / 'species'; a.FINAL_ALL_SPECIES_PARQUET=root / 'ala_species_records.parquet'; a.FINAL_ALL_SPECIES_CSV=root / 'ala_species_records.csv'; a.DUCKDB_PATH=root / 'ala_species_records.duckdb'; a.RUN_LOG_PATH=root / 'run_log.txt'; a.MANIFEST_PATH=root / 'species_manifest.csv'; a.MAX_RECORDS_PER_SPECIES=None; a.WRITE_CSV=True; a.FRESH_RUN=True; raise SystemExit(a.main())"
-```
-
-## Validation Notes
-
-The script logs when ALA resolves a requested scientific name to a different accepted or normalised taxon name. For strict taxonomic workflows, supply ALA LSIDs in `SPECIES_TARGETS` and validate records against:
-
-- Atlas of Living Australia
-- GBIF
-- Australian Faunal Directory / Braby taxonomy where needed
+Validate occurrence datasets against ALA, GBIF, and taxon-specific authority
+lists where needed. Use supplementary sources mainly to detect range extensions,
+recent spread, and under-sampled localities.
 
 ## Licence
 
-See `LICENSE` for repository licensing terms.
+See `LICENSE`.
