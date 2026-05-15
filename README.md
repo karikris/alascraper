@@ -103,7 +103,7 @@ raise SystemExit(
 
 ## Useful Constants
 
-Edit these in `alascraper.py` for normal runs:
+Edit these in `constants.py` for normal runs:
 
 ```python
 WORKERS = 12

@@ -55,12 +55,53 @@ import duckdb
 import polars as pl
 import requests
 
+from constants import (
+    ALA_SORT_DIRECTION,
+    ALA_SORT_FIELD,
+    API_URL,
+    COUNTRY_FILTER,
+    COUNTRY_FILTER_ENABLED,
+    DATASETS_ROOT,
+    DEDUPE_BY_UUID,
+    DEFAULT_GENERATED_ORDER,
+    EXACT_TAXON_NAME_FILTER_WHEN_LSID_SUPPLIED,
+    EXACT_TAXON_NAME_FILTER_WHEN_NO_LSID,
+    FIELDS,
+    FRESH_RUN,
+    HTTP_POOL_CONNECTIONS,
+    HTTP_POOL_MAXSIZE,
+    INCLUDE_USER_DATA_FIELDS,
+    INVALID_TAXON_LABELS,
+    MAX_IN_FLIGHT_TASKS,
+    MAX_RECORDS_PER_SPECIES,
+    MAX_RETRIES,
+    PAGE_SIZE,
+    PARQUET_COMPRESSION,
+    PARQUET_COMPRESSION_LEVEL,
+    PARQUET_ROW_GROUP_SIZE,
+    QUALITY_CONTROL,
+    QUALITY_PROFILE,
+    REFRESH_SPECIES_TARGETS_BEFORE_RUN,
+    REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES,
+    REQUEST_SLEEP_SECONDS_PER_PAGE,
+    RESUME_CACHE_VERSION,
+    RUN_CONFIG_VERSION,
+    SCHEMA,
+    SEARCH_API_MAX_WINDOW,
+    START_PARAM_NAME,
+    TIMEOUT_SECONDS,
+    USER_AGENT,
+    WORKERS,
+    WRITE_CSV,
+    WRITE_DUCKDB_DATABASE,
+    WRITE_RAW_PAGE_JSON,
+    YEAR_FACET_LIMIT,
+)
+
 
 # =============================================================================
-# USER-EDITABLE CONSTANTS
+# USER TARGETS
 # =============================================================================
-
-API_URL = "https://biocache-ws.ala.org.au/ws/occurrences/search"
 
 # -------------------------------------------------------------------------
 # Species constants
@@ -86,94 +127,12 @@ class SpeciesTarget:
 REPO_ROOT = Path(__file__).resolve().parent
 SPECIES_TARGETS_GENERATOR_SCRIPT = REPO_ROOT / "scripts" / "fetch_by_order.py"
 SPECIES_TARGETS_GENERATOR_MODULE = "scripts.fetch_by_order"
-DEFAULT_GENERATED_ORDER = "Lepidoptera"
-
-# Normal research runs refresh the ALA-backed scientific-name list first, then
-# load the dataset-local order-specific JSON target list.
-REFRESH_SPECIES_TARGETS_BEFORE_RUN = True
 
 # Optional fallback for programmatic/custom runs. The default main workflow uses
 # the generated ALA-backed list rather than maintaining a static four-species
 # example block in this file.
 SPECIES_TARGETS: list[SpeciesTarget] = []
 
-# -------------------------------------------------------------------------
-# Query controls
-# -------------------------------------------------------------------------
-
-QUALITY_PROFILE = "ALA"
-QUALITY_CONTROL = "-_nest_parent_:*"
-
-# ALA BioCache usually accepts `start` + `pageSize`.
-START_PARAM_NAME = "start"
-
-# Add broad fixed filters here.
-# Keep COUNTRY_FILTER_ENABLED=True for an Australia-only dataset.
-COUNTRY_FILTER_ENABLED = True
-COUNTRY_FILTER = 'country:"Australia"'
-
-# ALA can normalise accepted names differently from common field-guide names
-# (for example, Papilio aegeus may resolve as Papilio (Princeps) aegeus).
-# Keeping this False avoids silently filtering valid records down to zero.
-EXACT_TAXON_NAME_FILTER_WHEN_NO_LSID = False
-
-# If True, add fq=taxon_name:"Species name" even when LSID is supplied.
-# This can be stricter but may exclude records if ALA normalises names differently.
-EXACT_TAXON_NAME_FILTER_WHEN_LSID_SUPPLIED = False
-
-# Avoid relevance-score pagination for bulk export. `uuid` is not accepted as an
-# ALA sort field, so use eventDate and remove duplicate UUIDs during merge.
-ALA_SORT_FIELD = "eventDate"
-ALA_SORT_DIRECTION = "asc"
-DEDUPE_BY_UUID = True
-SEARCH_API_MAX_WINDOW = 5_000
-YEAR_FACET_LIMIT = 1_000
-INVALID_TAXON_LABELS = {
-    "not supplied",
-    "not provided",
-    "not recorded",
-    "unknown",
-    "unidentified",
-    "other values",
-}
-
-# -------------------------------------------------------------------------
-# Performance controls
-# -------------------------------------------------------------------------
-
-PAGE_SIZE = 500
-WORKERS = 12
-MAX_IN_FLIGHT_TASKS = WORKERS * 3
-
-REQUEST_SLEEP_SECONDS_PER_PAGE = 0.05
-REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES = 0.5
-
-MAX_RETRIES = 5
-TIMEOUT_SECONDS = 90
-HTTP_POOL_CONNECTIONS = WORKERS * 2
-HTTP_POOL_MAXSIZE = WORKERS * 2
-
-# Set for testing, e.g. 2_000. Use None for all records per species.
-MAX_RECORDS_PER_SPECIES: int | None = None
-
-# -------------------------------------------------------------------------
-# Output controls
-# -------------------------------------------------------------------------
-
-WRITE_CSV = False
-WRITE_DUCKDB_DATABASE = True
-WRITE_RAW_PAGE_JSON = False
-
-# Privacy/data-minimisation default:
-# keep False unless ethics approval explicitly covers observer names, source
-# observation links, and user-submitted media identifiers/URLs.
-INCLUDE_USER_DATA_FIELDS = False
-
-# If True, delete all previous outputs.
-# If False, existing shard files are reused.
-FRESH_RUN = False
-
-DATASETS_ROOT = Path("datasets")
 OUTPUT_ROOT = DATASETS_ROOT / "misc" / "lepidoptera"
 SPECIES_ROOT = OUTPUT_ROOT / "species"
 FINAL_ALL_SPECIES_PARQUET = OUTPUT_ROOT / "ala_species_records.parquet"
@@ -181,148 +140,6 @@ FINAL_ALL_SPECIES_CSV = OUTPUT_ROOT / "ala_species_records.csv"
 DUCKDB_PATH = OUTPUT_ROOT / "ala_species_records.duckdb"
 RUN_LOG_PATH = OUTPUT_ROOT / "run_log.txt"
 MANIFEST_PATH = OUTPUT_ROOT / "species_manifest.csv"
-
-PARQUET_COMPRESSION = "zstd"
-PARQUET_COMPRESSION_LEVEL = 3
-PARQUET_ROW_GROUP_SIZE = 100_000
-
-USER_AGENT = (
-    "Monash-ALA-species-occurrence-research/0.4 "
-    "(contact: replace-with-your-email@monash.edu)"
-)
-
-RUN_CONFIG_VERSION = 2
-RESUME_CACHE_VERSION = 1
-
-# -------------------------------------------------------------------------
-# Fields retained in the analysis table.
-#
-# By default, omit fields that can expose observer/user data or link back to
-# source observations/media. `uuid` remains as the ALA record identifier.
-# -------------------------------------------------------------------------
-
-BASE_FIELDS = [
-    "query_species_key",
-    "query_scientific_name",
-    "query_common_name",
-    "query_taxon_lsid",
-    "target_match_suspect",
-    "uuid",
-    "scientificName",
-    "raw_scientificName",
-    "vernacularName",
-    "taxonRank",
-    "taxonConceptID",
-    "kingdom",
-    "phylum",
-    "classs",
-    "order",
-    "family",
-    "genus",
-    "species",
-    "country",
-    "stateProvince",
-    "decimalLatitude",
-    "decimalLongitude",
-    "coordinateUncertaintyInMeters",
-    "spatiallyValid",
-    "geospatialKosher",
-    "eventDate",
-    "eventDate_iso",
-    "year",
-    "month",
-    "day",
-    "basisOfRecord",
-    "raw_basisOfRecord",
-    "dataProviderUid",
-    "dataProviderName",
-    "dataResourceUid",
-    "dataResourceName",
-    "license",
-    "identificationVerificationStatus",
-    "recordNumber",
-    "assertions",
-    "speciesGroups",
-    "latLong",
-]
-
-USER_DATA_FIELDS = [
-    "occurrenceID",
-    "recordedBy",
-    "collectors",
-    "collector",
-    "image",
-    "images",
-    "imageUrl",
-    "largeImageUrl",
-    "smallImageUrl",
-    "thumbnailUrl",
-    "imageUrls",
-    "references",
-    "occurrenceDetails",
-]
-
-FIELDS = BASE_FIELDS + (USER_DATA_FIELDS if INCLUDE_USER_DATA_FIELDS else [])
-
-FIELD_SCHEMA: dict[str, pl.DataType] = {
-    "query_species_key": pl.Utf8,
-    "query_scientific_name": pl.Utf8,
-    "query_common_name": pl.Utf8,
-    "query_taxon_lsid": pl.Utf8,
-    "target_match_suspect": pl.Boolean,
-    "uuid": pl.Utf8,
-    "occurrenceID": pl.Utf8,
-    "scientificName": pl.Utf8,
-    "raw_scientificName": pl.Utf8,
-    "vernacularName": pl.Utf8,
-    "taxonRank": pl.Utf8,
-    "taxonConceptID": pl.Utf8,
-    "kingdom": pl.Utf8,
-    "phylum": pl.Utf8,
-    "classs": pl.Utf8,
-    "order": pl.Utf8,
-    "family": pl.Utf8,
-    "genus": pl.Utf8,
-    "species": pl.Utf8,
-    "country": pl.Utf8,
-    "stateProvince": pl.Utf8,
-    "decimalLatitude": pl.Float64,
-    "decimalLongitude": pl.Float64,
-    "coordinateUncertaintyInMeters": pl.Float64,
-    "spatiallyValid": pl.Boolean,
-    "geospatialKosher": pl.Utf8,
-    "eventDate": pl.Int64,
-    "eventDate_iso": pl.Utf8,
-    "year": pl.Int64,
-    "month": pl.Utf8,
-    "day": pl.Utf8,
-    "basisOfRecord": pl.Utf8,
-    "raw_basisOfRecord": pl.Utf8,
-    "dataProviderUid": pl.Utf8,
-    "dataProviderName": pl.Utf8,
-    "dataResourceUid": pl.Utf8,
-    "dataResourceName": pl.Utf8,
-    "recordedBy": pl.Utf8,
-    "collectors": pl.Utf8,
-    "collector": pl.Utf8,
-    "license": pl.Utf8,
-    "image": pl.Utf8,
-    "images": pl.Utf8,
-    "imageUrl": pl.Utf8,
-    "largeImageUrl": pl.Utf8,
-    "smallImageUrl": pl.Utf8,
-    "thumbnailUrl": pl.Utf8,
-    "imageUrls": pl.Utf8,
-    "references": pl.Utf8,
-    "occurrenceDetails": pl.Utf8,
-    "identificationVerificationStatus": pl.Utf8,
-    "recordNumber": pl.Utf8,
-    "assertions": pl.Utf8,
-    "speciesGroups": pl.Utf8,
-    "latLong": pl.Utf8,
-}
-
-SCHEMA: dict[str, pl.DataType] = {field: FIELD_SCHEMA[field] for field in FIELDS}
 
 
 # =============================================================================

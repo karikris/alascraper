@@ -17,47 +17,48 @@ import argparse
 import csv
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import requests
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from constants import (
+    API_URL,
+    COUNTRY_FILTER,
+    DEFAULT_GENERATED_ORDER,
+    INVALID_TAXON_LABELS,
+    QUALITY_CONTROL,
+    QUALITY_PROFILE,
+    TARGET_GENERATOR_FACET_FIELDS,
+    TARGET_GENERATOR_FACET_LIMIT,
+    TARGET_GENERATOR_OUTPUT_DIR,
+    TARGET_GENERATOR_REQUEST_SLEEP_SECONDS,
+    TARGET_GENERATOR_TIMEOUT_SECONDS,
+    TARGET_GENERATOR_USER_AGENT,
+)
+
 
 # =============================================================================
 # USER CONSTANTS
 # =============================================================================
 
-API_URL = "https://biocache-ws.ala.org.au/ws/occurrences/search"
-
-ORDER = "Lepidoptera"
-
-OUTPUT_DIR = Path("datasets") / "misc" / "lepidoptera"
-
-COUNTRY_FILTER = 'country:"Australia"'
-QUALITY_PROFILE = "ALA"
-QUALITY_CONTROL = "-_nest_parent_:*"
+ORDER = DEFAULT_GENERATED_ORDER
+OUTPUT_DIR = TARGET_GENERATOR_OUTPUT_DIR
 
 # `species` is the stable baseline. `subspecies` is included where ALA facets
 # expose lower taxa, supporting the 596 species/subspecies target.
-FACET_FIELDS = ["species", "subspecies"]
-FACET_LIMIT = 1000
-REQUEST_SLEEP_SECONDS = 0.3
-TIMEOUT_SECONDS = 60
-
-USER_AGENT = (
-    "Monash-ALA-order-species-list/0.3 "
-    "(contact: replace-with-your-email@monash.edu)"
-)
-
-INVALID_TAXON_LABELS = {
-    "not supplied",
-    "not provided",
-    "not recorded",
-    "unknown",
-    "unidentified",
-    "other values",
-}
+FACET_FIELDS = TARGET_GENERATOR_FACET_FIELDS
+FACET_LIMIT = TARGET_GENERATOR_FACET_LIMIT
+REQUEST_SLEEP_SECONDS = TARGET_GENERATOR_REQUEST_SLEEP_SECONDS
+TIMEOUT_SECONDS = TARGET_GENERATOR_TIMEOUT_SECONDS
+USER_AGENT = TARGET_GENERATOR_USER_AGENT
 
 
 # =============================================================================
