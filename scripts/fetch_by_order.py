@@ -104,7 +104,11 @@ def is_probable_scientific_name(name: str) -> bool:
     return all(re.match(r"^[a-z][a-z-]+$", part) for part in parts[1:])
 
 
-def build_params(order: str, facet_field: str) -> list[tuple[str, str | int]]:
+def build_params(
+    order: str,
+    facet_field: str,
+    facet_offset: int = 0,
+) -> list[tuple[str, str | int]]:
     return [
         ("q", "*:*"),
         ("fq", COUNTRY_FILTER),
@@ -115,6 +119,7 @@ def build_params(order: str, facet_field: str) -> list[tuple[str, str | int]]:
         ("facet", "true"),
         ("facets", facet_field),
         ("flimit", FACET_LIMIT),
+        ("foffset", facet_offset),
     ]
 
 
@@ -123,41 +128,50 @@ def fetch_order_taxa(
     order: str,
     facet_field: str,
 ) -> list[dict[str, Any]]:
-    response = session.get(
-        API_URL,
-        params=build_params(order, facet_field),
-        timeout=TIMEOUT_SECONDS,
-    )
-    response.raise_for_status()
-    data = response.json()
-
     rows: list[dict[str, Any]] = []
+    facet_offset = 0
 
-    for facet in data.get("facetResults", []):
-        if facet.get("fieldName") != facet_field:
-            continue
+    while True:
+        response = session.get(
+            API_URL,
+            params=build_params(order, facet_field, facet_offset),
+            timeout=TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        data = response.json()
+        page_items: list[dict[str, Any]] = []
 
-        for item in facet.get("fieldResult", []):
+        for facet in data.get("facetResults", []):
+            if facet.get("fieldName") != facet_field:
+                continue
+
+            page_items.extend(facet.get("fieldResult", []))
+
+        for item in page_items:
             scientific_name = item.get("label")
             count = int(item.get("count", 0) or 0)
             fq = item.get("fq")
 
-            if not scientific_name or count <= 0:
-                continue
+            if scientific_name and count > 0 and is_probable_scientific_name(scientific_name):
+                rows.append(
+                    {
+                        "species_key": safe_key(scientific_name),
+                        "scientific_name": scientific_name,
+                        "order": order,
+                        "facet_field": facet_field,
+                        "ala_occurrence_count": count,
+                        "ala_facet_fq": fq,
+                    }
+                )
 
-            if not is_probable_scientific_name(scientific_name):
-                continue
+        if len(page_items) < FACET_LIMIT:
+            break
 
-            rows.append(
-                {
-                    "species_key": safe_key(scientific_name),
-                    "scientific_name": scientific_name,
-                    "order": order,
-                    "facet_field": facet_field,
-                    "ala_occurrence_count": count,
-                    "ala_facet_fq": fq,
-                }
-            )
+        facet_offset += FACET_LIMIT
+        print(
+            f"  facet page limit reached for {facet_field}; requesting offset={facet_offset:,}",
+            flush=True,
+        )
 
     return rows
 

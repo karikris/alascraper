@@ -195,7 +195,8 @@ USER_AGENT = (
     "(contact: replace-with-your-email@monash.edu)"
 )
 
-RUN_CONFIG_VERSION = 1
+RUN_CONFIG_VERSION = 2
+RESUME_CACHE_VERSION = 1
 
 # -------------------------------------------------------------------------
 # Fields retained in the analysis table.
@@ -387,6 +388,8 @@ class SpeciesResult:
     planned_partition_records: int = 0
     page_validation_issue_count: int = 0
     page_validation_detail: str | None = None
+    fetch_status: str = "complete"
+    fetch_error: str | None = None
 
 
 _SESSION_LOCAL = threading.local()
@@ -905,6 +908,7 @@ def schema_signature() -> list[dict[str, str]]:
 def species_run_config(target: SpeciesTarget) -> dict[str, Any]:
     return {
         "run_config_version": RUN_CONFIG_VERSION,
+        "resume_cache_version": RESUME_CACHE_VERSION,
         "script_sha256": script_sha256(),
         "api_url": API_URL,
         "quality_profile": QUALITY_PROFILE,
@@ -1069,6 +1073,40 @@ def close_all_sessions() -> None:
 atexit.register(close_all_sessions)
 
 
+def request_json_with_retries(
+    *,
+    session: requests.Session,
+    params: list[tuple[str, str | int]],
+    context: str,
+) -> dict[str, Any]:
+    last_error: Exception | None = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = session.get(API_URL, params=params, timeout=TIMEOUT_SECONDS)
+
+            if response.status_code == 429:
+                wait = min(120, 10 * attempt)
+                log(f"HTTP 429 for {context}. Sleeping {wait}s.")
+                response.close()
+                time.sleep(wait)
+                continue
+
+            response.raise_for_status()
+            return response.json()
+
+        except Exception as exc:
+            last_error = exc
+            wait = min(120, 2**attempt)
+            log(
+                f"Request failed: {context}, attempt={attempt}/{MAX_RETRIES}, "
+                f"error={exc}. Retrying in {wait}s."
+            )
+            time.sleep(wait)
+
+    raise RuntimeError(f"Failed {context} after {MAX_RETRIES} retries: {last_error}")
+
+
 def fetch_json(
     target: SpeciesTarget,
     start: int,
@@ -1081,34 +1119,10 @@ def fetch_json(
         page_size=page_size,
         extra_fq_filters=extra_fq_filters,
     )
-    last_error: Exception | None = None
-    session = get_thread_session()
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = session.get(API_URL, params=params, timeout=TIMEOUT_SECONDS)
-
-            if response.status_code == 429:
-                wait = min(120, 10 * attempt)
-                log(f"HTTP 429 for species={target.key}, start={start}. Sleeping {wait}s.")
-                response.close()
-                time.sleep(wait)
-                continue
-
-            response.raise_for_status()
-            return response.json()
-
-        except Exception as exc:
-            last_error = exc
-            wait = min(120, 2**attempt)
-            log(
-                f"Fetch failed: species={target.key}, start={start}, "
-                f"attempt={attempt}/{MAX_RETRIES}, error={exc}. Retrying in {wait}s."
-            )
-            time.sleep(wait)
-
-    raise RuntimeError(
-        f"Failed species={target.key}, start={start} after {MAX_RETRIES} retries: {last_error}"
+    return request_json_with_retries(
+        session=get_thread_session(),
+        params=params,
+        context=f"species={target.key}, start={start}",
     )
 
 
@@ -1154,9 +1168,11 @@ def fetch_facet_partitions(
     for fq in [*build_fq_filters(target), *extra_fq_filters]:
         params.append(("fq", fq))
 
-    response = get_thread_session().get(API_URL, params=params, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
-    data = response.json()
+    data = request_json_with_retries(
+        session=get_thread_session(),
+        params=params,
+        context=f"species={target.key}, facet={facet_field}",
+    )
     partitions: list[QueryPartition] = []
 
     for facet in data.get("facetResults", []):
@@ -1548,10 +1564,22 @@ def run_parallel_fetch_for_species(target: SpeciesTarget, tasks: list[PageTask])
                     result = future.result()
                 except Exception as exc:
                     log(
-                        f"Page failed permanently: species={target.key}, "
-                        f"page={task.page_index}, start={task.start}, error={exc}"
+                        f"Species={target.key}: warning: page failed after retries; "
+                        f"keeping run alive with empty shard. page={task.page_index}, "
+                        f"start={task.start}, error={exc}"
                     )
-                    raise
+                    path = shard_path(target, task.page_index)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    pl.DataFrame([], schema=SCHEMA).write_parquet(path)
+                    result = PageResult(
+                        species_key=target.key,
+                        page_index=task.page_index,
+                        start=task.start,
+                        count=0,
+                        shard_path=path,
+                        validation_status="fetch_failed",
+                        validation_detail=str(exc),
+                    )
 
                 results.append(result)
                 completed += 1
@@ -1771,6 +1799,8 @@ def write_manifest(
                 "partition_coverage_detail",
                 "page_validation_issue_count",
                 "page_validation_detail",
+                "fetch_status",
+                "fetch_error",
                 "pages_written",
                 "rows_written",
                 "elapsed_seconds",
@@ -1801,6 +1831,8 @@ def write_manifest(
                     "partition_coverage_detail": result.partition_coverage_detail or "",
                     "page_validation_issue_count": result.page_validation_issue_count,
                     "page_validation_detail": result.page_validation_detail or "",
+                    "fetch_status": result.fetch_status,
+                    "fetch_error": result.fetch_error or "",
                     "pages_written": result.pages_written,
                     "rows_written": result.rows_written,
                     "elapsed_seconds": f"{result.elapsed_seconds:.3f}",
@@ -1832,6 +1864,20 @@ def validate_privacy_settings() -> None:
         raise ValueError(
             "WRITE_RAW_PAGE_JSON=True would store raw observer/source/media fields. "
             "Set INCLUDE_USER_DATA_FIELDS=True only when ethics approval covers it."
+        )
+
+
+def validate_run_settings() -> None:
+    if MAX_RECORDS_PER_SPECIES is None:
+        return
+
+    if MAX_RECORDS_PER_SPECIES <= 0:
+        raise ValueError("MAX_RECORDS_PER_SPECIES must be positive or None.")
+
+    if MAX_RECORDS_PER_SPECIES > SEARCH_API_MAX_WINDOW:
+        raise ValueError(
+            "MAX_RECORDS_PER_SPECIES must not exceed SEARCH_API_MAX_WINDOW; "
+            "larger test caps can hide partitioning mistakes."
         )
 
 
@@ -1928,6 +1974,29 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
     )
 
 
+def failed_species_result(target: SpeciesTarget, error: Exception) -> SpeciesResult:
+    species_output = species_parquet_path(target)
+    species_output.parent.mkdir(parents=True, exist_ok=True)
+
+    if not species_output.exists():
+        pl.DataFrame([], schema=SCHEMA).write_parquet(species_output)
+
+    return SpeciesResult(
+        species_key=target.key,
+        scientific_name=target.scientific_name,
+        common_name=target.common_name,
+        taxon_lsid=target.taxon_lsid,
+        config_fingerprint=config_fingerprint(species_run_config(target)),
+        reported_total_records=0,
+        pages_written=0,
+        rows_written=0,
+        elapsed_seconds=0.0,
+        species_parquet_path=species_output,
+        fetch_status="failed",
+        fetch_error=str(error),
+    )
+
+
 def run_alascraper(
     *,
     species_targets: list[SpeciesTarget | dict[str, Any]] | None = None,
@@ -1945,6 +2014,7 @@ def run_alascraper(
 
     run_started = time.perf_counter()
     validate_privacy_settings()
+    validate_run_settings()
     prepare_output_dirs()
 
     if species_targets is not None:
@@ -1973,7 +2043,15 @@ def run_alascraper(
     species_results: list[SpeciesResult] = []
 
     for target in active_targets:
-        result = fetch_one_species(target)
+        try:
+            result = fetch_one_species(target)
+        except Exception as exc:
+            log(
+                f"Species={target.key}: failed after retries; continuing with next "
+                f"target. error={exc}"
+            )
+            result = failed_species_result(target, exc)
+
         species_results.append(result)
         time.sleep(REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES)
 

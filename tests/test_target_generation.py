@@ -185,6 +185,51 @@ def test_build_params_queries_australian_order_facets() -> None:
     assert ("fq", 'country:"Australia"') in params
     assert ("fq", 'order:"Neuroptera"') in params
     assert ("facets", "species") in params
+    assert ("foffset", 0) in params
+
+
+def test_fetch_order_taxa_pages_past_facet_limit(monkeypatch) -> None:
+    monkeypatch.setattr(generator, "FACET_LIMIT", 1)
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.payload
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.offsets: list[int] = []
+
+        def get(self, _url: str, *, params, timeout: int):  # type: ignore[no-untyped-def]
+            params_dict = dict(params)
+            offset = int(params_dict["foffset"])
+            self.offsets.append(offset)
+            rows = (
+                [{"label": "Poa annua", "count": 2, "fq": 'species:"Poa annua"'}]
+                if offset == 0
+                else []
+            )
+            return FakeResponse(
+                {
+                    "facetResults": [
+                        {
+                            "fieldName": "species",
+                            "fieldResult": rows,
+                        }
+                    ]
+                }
+            )
+
+    session = FakeSession()
+    rows = generator.fetch_order_taxa(session, "Poales", "species")
+
+    assert session.offsets == [0, 1]
+    assert [row["scientific_name"] for row in rows] == ["Poa annua"]
 
 
 def test_merge_taxa_deduplicates_species_and_subspecies_rows() -> None:

@@ -74,3 +74,27 @@ def test_cached_shard_with_wrong_row_count_is_refetched(
     assert called is True
     assert result.count == 2
     assert set(df["uuid"].to_list()) == {"fresh-1", "fresh-2"}
+
+
+def test_parallel_fetch_keeps_failed_page_as_empty_shard(
+    monkeypatch,
+    isolated_outputs,
+    target: a.SpeciesTarget,
+) -> None:
+    monkeypatch.setattr(a, "WORKERS", 1)
+    monkeypatch.setattr(a, "MAX_IN_FLIGHT_TASKS", 1)
+
+    def fail_page(_task: a.PageTask) -> a.PageResult:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(a, "write_page_shard", fail_page)
+
+    results = a.run_parallel_fetch_for_species(
+        target,
+        [a.PageTask(target=target, page_index=0, start=0, page_size=1)],
+    )
+
+    assert len(results) == 1
+    assert results[0].count == 0
+    assert results[0].validation_status == "fetch_failed"
+    assert results[0].shard_path.exists()

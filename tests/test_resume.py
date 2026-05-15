@@ -38,3 +38,18 @@ def test_script_hash_only_change_retains_species_output(
     a.prepare_species_output_for_config(target)
 
     assert sentinel.exists()
+
+
+def test_resume_cache_version_change_deletes_species_output(
+    monkeypatch,
+    isolated_outputs,
+    target: a.SpeciesTarget,
+) -> None:
+    a.prepare_species_output_for_config(target)
+    sentinel = a.species_dir(target) / "sentinel.txt"
+    sentinel.write_text("stale", encoding="utf-8")
+
+    monkeypatch.setattr(a, "RESUME_CACHE_VERSION", a.RESUME_CACHE_VERSION + 1)
+    a.prepare_species_output_for_config(target)
+
+    assert not sentinel.exists()
