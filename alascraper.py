@@ -349,6 +349,8 @@ class PageResult:
     start: int
     count: int
     shard_path: Path
+    validation_status: str = "complete"
+    validation_detail: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +385,8 @@ class SpeciesResult:
     partition_coverage_status: str = "complete"
     partition_coverage_detail: str | None = None
     planned_partition_records: int = 0
+    page_validation_issue_count: int = 0
+    page_validation_detail: str | None = None
 
 
 _SESSION_LOCAL = threading.local()
@@ -1397,23 +1401,61 @@ def write_page_shard(task: PageTask) -> PageResult:
     if path.exists() and path.stat().st_size > 0:
         try:
             existing_rows = pl.scan_parquet(path).select(pl.len()).collect().item()
-            return PageResult(
-                species_key=target.key,
-                page_index=task.page_index,
-                start=task.start,
-                count=int(existing_rows),
-                shard_path=path,
+
+            if int(existing_rows) == task.page_size:
+                return PageResult(
+                    species_key=target.key,
+                    page_index=task.page_index,
+                    start=task.start,
+                    count=int(existing_rows),
+                    shard_path=path,
+                )
+
+            log(
+                f"Species={target.key}: cached shard page={task.page_index} has "
+                f"rows={int(existing_rows):,}, expected={task.page_size:,}; refetching."
             )
+            path.unlink(missing_ok=True)
         except Exception:
             path.unlink(missing_ok=True)
 
-    data = fetch_json(
-        target=target,
-        start=task.start,
-        page_size=task.page_size,
-        extra_fq_filters=task.extra_fq_filters,
-    )
-    records = data.get("occurrences", [])
+    data: dict[str, Any] = {}
+    records: list[dict[str, Any]] = []
+    validation_status = "complete"
+    validation_detail: str | None = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        data = fetch_json(
+            target=target,
+            start=task.start,
+            page_size=task.page_size,
+            extra_fq_filters=task.extra_fq_filters,
+        )
+        records = data.get("occurrences", [])
+
+        if len(records) == task.page_size:
+            validation_detail = None
+            break
+
+        validation_detail = (
+            f"page={task.page_index} start={task.start} rows={len(records):,}, "
+            f"expected={task.page_size:,}"
+        )
+
+        if attempt < MAX_RETRIES:
+            wait = min(120, 2**attempt)
+            log(
+                f"Species={target.key}: partial page response ({validation_detail}); "
+                f"retrying page validation attempt={attempt}/{MAX_RETRIES} in {wait}s."
+            )
+            time.sleep(wait)
+            continue
+
+        validation_status = "partial_row_count"
+        log(
+            f"Species={target.key}: warning: keeping partial page after retries "
+            f"({validation_detail})."
+        )
 
     if WRITE_RAW_PAGE_JSON:
         raw_json_dir(target).mkdir(parents=True, exist_ok=True)
@@ -1442,6 +1484,8 @@ def write_page_shard(task: PageTask) -> PageResult:
         start=task.start,
         count=len(rows),
         shard_path=path,
+        validation_status=validation_status,
+        validation_detail=validation_detail,
     )
 
 
@@ -1725,6 +1769,8 @@ def write_manifest(
                 "planned_partition_records",
                 "partition_coverage_status",
                 "partition_coverage_detail",
+                "page_validation_issue_count",
+                "page_validation_detail",
                 "pages_written",
                 "rows_written",
                 "elapsed_seconds",
@@ -1753,6 +1799,8 @@ def write_manifest(
                     "planned_partition_records": result.planned_partition_records,
                     "partition_coverage_status": result.partition_coverage_status,
                     "partition_coverage_detail": result.partition_coverage_detail or "",
+                    "page_validation_issue_count": result.page_validation_issue_count,
+                    "page_validation_detail": result.page_validation_detail or "",
                     "pages_written": result.pages_written,
                     "rows_written": result.rows_written,
                     "elapsed_seconds": f"{result.elapsed_seconds:.3f}",
@@ -1842,6 +1890,13 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
 
     page_results = run_parallel_fetch_for_species(target, tasks)
     rows_written = sum(result.count for result in page_results)
+    page_validation_issues = [
+        result for result in page_results if result.validation_status != "complete"
+    ]
+    page_validation_detail = " | ".join(
+        result.validation_detail or result.validation_status
+        for result in page_validation_issues
+    ) or None
 
     log(f"Species={target.key}: shard rows written={rows_written:,}")
 
@@ -1868,6 +1923,8 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
         partition_coverage_status=partition_plan.coverage_status,
         partition_coverage_detail=partition_plan.coverage_detail,
         planned_partition_records=partition_plan.planned_partition_records,
+        page_validation_issue_count=len(page_validation_issues),
+        page_validation_detail=page_validation_detail,
     )
 
 

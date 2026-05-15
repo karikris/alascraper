@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import polars as pl
-import pytest
 
 import alascraper as a
 
 
-@pytest.mark.xfail(strict=True, reason="Known finding: short pages are not rejected yet.")
-def test_short_pages_are_retried_then_rejected(monkeypatch, isolated_outputs, target: a.SpeciesTarget) -> None:
+def test_short_pages_are_retried_then_kept_with_partial_status(
+    monkeypatch,
+    isolated_outputs,
+    target: a.SpeciesTarget,
+) -> None:
     calls = 0
 
     def fake_fetch_json(*args, **kwargs):
@@ -17,25 +19,32 @@ def test_short_pages_are_retried_then_rejected(monkeypatch, isolated_outputs, ta
 
     monkeypatch.setattr(a, "fetch_json", fake_fetch_json)
     monkeypatch.setattr(a, "MAX_RETRIES", 2)
+    monkeypatch.setattr(a.time, "sleep", lambda _seconds: None)
     task = a.PageTask(target=target, page_index=0, start=0, page_size=2)
 
-    with pytest.raises(RuntimeError, match="partial shard|row-count"):
-        a.write_page_shard(task)
+    result = a.write_page_shard(task)
 
     assert calls == 2
+    assert result.count == 1
+    assert result.validation_status == "partial_row_count"
+    assert "expected=2" in (result.validation_detail or "")
 
 
-@pytest.mark.xfail(strict=True, reason="Known finding: empty pages are not rejected yet.")
-def test_empty_pages_are_retried_then_rejected(monkeypatch, isolated_outputs, target: a.SpeciesTarget) -> None:
+def test_empty_pages_are_retried_then_kept_with_partial_status(
+    monkeypatch,
+    isolated_outputs,
+    target: a.SpeciesTarget,
+) -> None:
     monkeypatch.setattr(a, "fetch_json", lambda *args, **kwargs: {"occurrences": []})
     monkeypatch.setattr(a, "MAX_RETRIES", 2)
+    monkeypatch.setattr(a.time, "sleep", lambda _seconds: None)
     task = a.PageTask(target=target, page_index=0, start=0, page_size=2)
 
-    with pytest.raises(RuntimeError, match="partial shard|row-count"):
-        a.write_page_shard(task)
+    result = a.write_page_shard(task)
 
+    assert result.count == 0
+    assert result.validation_status == "partial_row_count"
 
-@pytest.mark.xfail(strict=True, reason="Known finding: cached shards are reused without expected row-count validation.")
 def test_cached_shard_with_wrong_row_count_is_refetched(
     monkeypatch,
     isolated_outputs,
