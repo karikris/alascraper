@@ -35,23 +35,20 @@ def test_coerce_species_target_rejects_missing_scientific_name() -> None:
         a.coerce_species_target({"key": "missing_name"})
 
 
-def test_load_generated_species_targets_imports_generated_module(monkeypatch, tmp_path) -> None:
+def test_load_generated_species_targets_reads_generated_json(monkeypatch, tmp_path) -> None:
     dataset_dir = tmp_path / "datasets" / "insecta" / "lepidoptera"
     dataset_dir.mkdir(parents=True)
-    generated_path = dataset_dir / "species_targets_generated.py"
+    generated_path = dataset_dir / "lepidoptera_species.json"
     generated_path.write_text(
-        "SPECIES_TARGETS = ["
-        "{'key': 'papilio_aegeus', 'scientific_name': 'Papilio aegeus', "
-        "'common_name': None, 'taxon_lsid': None, 'order': 'Lepidoptera', "
-        "'ala_facet_fq': 'species:\"Papilio aegeus\"'}"
-        "]\n",
+        '[{"species_key": "papilio_aegeus", "scientific_name": "Papilio aegeus", '
+        '"order": "Lepidoptera", "facet_fields": "species", '
+        '"ala_occurrence_count": 1, "ala_facet_fq": "species:\\"Papilio aegeus\\""}]\n',
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(a, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(a, "GENERATED_SPECIES_TARGETS_PATH", generated_path)
+    monkeypatch.setattr(a, "OUTPUT_ROOT", dataset_dir)
 
-    targets = a.load_generated_species_targets()
+    targets = a.load_generated_species_targets("Lepidoptera")
 
     assert targets == [
         a.SpeciesTarget(
@@ -141,11 +138,7 @@ def test_generate_species_targets_file_passes_order(monkeypatch, tmp_path) -> No
             captured["order"] = order
             captured["output_dir"] = str(output_dir)
 
-    monkeypatch.setattr(
-        a,
-        "GENERATED_SPECIES_TARGETS_PATH",
-        tmp_path / "species_targets_generated.py",
-    )
+    monkeypatch.setattr(a, "OUTPUT_ROOT", tmp_path)
     monkeypatch.setattr(
         a,
         "SPECIES_TARGETS_GENERATOR_SCRIPT",
@@ -266,32 +259,6 @@ def test_merge_taxa_deduplicates_species_and_subspecies_rows() -> None:
     ]
 
 
-def test_write_python_targets_contains_species_targets(tmp_path) -> None:
-    generated_path = (
-        tmp_path / "datasets" / "insecta" / "lepidoptera" / "species_targets_generated.py"
-    )
-
-    generator.write_python_targets(
-        [
-            {
-                "species_key": "papilio_aegeus",
-                "scientific_name": "Papilio aegeus",
-                "order": "Lepidoptera",
-                "facet_fields": "species",
-                "ala_occurrence_count": 42,
-                "ala_facet_fq": 'species:"Papilio aegeus"',
-            }
-        ],
-        generated_path,
-    )
-
-    text = generated_path.read_text(encoding="utf-8")
-
-    assert "SPECIES_TARGETS = [" in text
-    assert "'key': 'papilio_aegeus'" in text
-    assert "'order': 'Lepidoptera'" in text
-
-
 def test_generate_species_targets_rejects_empty_valid_target_list(monkeypatch, tmp_path) -> None:
     output_dir = tmp_path / "datasets" / "monocot" / "poales"
     monkeypatch.setattr(generator, "REQUEST_SLEEP_SECONDS", 0)
@@ -300,4 +267,4 @@ def test_generate_species_targets_rejects_empty_valid_target_list(monkeypatch, t
     with pytest.raises(ValueError, match="No valid ALA species targets found"):
         generator.generate_species_targets(order="Neuroptera", output_dir=output_dir)
 
-    assert not (output_dir / "species_targets_generated.py").exists()
+    assert not (output_dir / "neuroptera_species.json").exists()

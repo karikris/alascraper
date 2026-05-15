@@ -54,8 +54,8 @@ for another ALA order before running the occurrence scraper.
 
 The generator writes order-specific review files such as
 `datasets/insecta/neuroptera/neuroptera_species.csv` and
-`datasets/insecta/neuroptera/neuroptera_species.json`, plus the dataset-local
-`species_targets_generated.py` module consumed by `alascraper.py`.
+`datasets/insecta/neuroptera/neuroptera_species.json`. `alascraper.py` reads
+the order-specific JSON file directly.
 
 ## Call a Species Directly
 
@@ -127,7 +127,6 @@ datasets/<class_or_misc>/<order>/
 ├── ala_species_records.duckdb
 ├── <order>_species.csv
 ├── <order>_species.json
-├── species_targets_generated.py
 ├── run_log.txt
 ├── species_manifest.csv
 └── species/

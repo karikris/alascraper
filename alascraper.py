@@ -38,7 +38,6 @@ import concurrent.futures as cf
 import csv
 import hashlib
 import importlib
-import importlib.util
 import json
 import math
 import os
@@ -85,15 +84,12 @@ class SpeciesTarget:
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-GENERATED_SPECIES_TARGETS_PATH = (
-    REPO_ROOT / "datasets" / "misc" / "lepidoptera" / "species_targets_generated.py"
-)
 SPECIES_TARGETS_GENERATOR_SCRIPT = REPO_ROOT / "scripts" / "fetch_by_order.py"
 SPECIES_TARGETS_GENERATOR_MODULE = "scripts.fetch_by_order"
 DEFAULT_GENERATED_ORDER = "Lepidoptera"
 
 # Normal research runs refresh the ALA-backed scientific-name list first, then
-# import the dataset-local species_targets_generated.py.
+# load the dataset-local order-specific JSON target list.
 REFRESH_SPECIES_TARGETS_BEFORE_RUN = True
 
 # Optional fallback for programmatic/custom runs. The default main workflow uses
@@ -417,6 +413,15 @@ def dataset_output_root(order: str | None, dataset_class: str | None) -> Path:
     return DATASETS_ROOT / class_key / order_key
 
 
+def generated_species_targets_path(order: str | None = None) -> Path:
+    order_key = safe_key(order or DEFAULT_GENERATED_ORDER)
+
+    if not order_key:
+        raise ValueError("Order must not be empty.")
+
+    return OUTPUT_ROOT / f"{order_key}_species.json"
+
+
 def configure_output_root(output_root: Path) -> None:
     global OUTPUT_ROOT
     global SPECIES_ROOT
@@ -425,8 +430,6 @@ def configure_output_root(output_root: Path) -> None:
     global DUCKDB_PATH
     global RUN_LOG_PATH
     global MANIFEST_PATH
-    global GENERATED_SPECIES_TARGETS_PATH
-
     OUTPUT_ROOT = output_root
     SPECIES_ROOT = OUTPUT_ROOT / "species"
     FINAL_ALL_SPECIES_PARQUET = OUTPUT_ROOT / "ala_species_records.parquet"
@@ -434,7 +437,6 @@ def configure_output_root(output_root: Path) -> None:
     DUCKDB_PATH = OUTPUT_ROOT / "ala_species_records.duckdb"
     RUN_LOG_PATH = OUTPUT_ROOT / "run_log.txt"
     MANIFEST_PATH = OUTPUT_ROOT / "species_manifest.csv"
-    GENERATED_SPECIES_TARGETS_PATH = OUTPUT_ROOT / "species_targets_generated.py"
 
 
 def is_probable_scientific_name(name: str) -> bool:
@@ -499,7 +501,9 @@ def generate_species_targets_file(
     *,
     order: str | None = None,
 ) -> None:
-    if GENERATED_SPECIES_TARGETS_PATH.exists() and not refresh:
+    targets_path = generated_species_targets_path(order)
+
+    if targets_path.exists() and not refresh:
         return
 
     if not SPECIES_TARGETS_GENERATOR_SCRIPT.exists():
@@ -523,36 +527,24 @@ def generate_species_targets_file(
         module.generate_species_targets(order=order, output_dir=OUTPUT_ROOT)
 
 
-def load_generated_species_targets() -> list[SpeciesTarget]:
-    if not GENERATED_SPECIES_TARGETS_PATH.exists():
+def load_generated_species_targets(order: str | None = None) -> list[SpeciesTarget]:
+    targets_path = generated_species_targets_path(order)
+
+    if not targets_path.exists():
         raise FileNotFoundError(
-            f"Missing generated species targets: {GENERATED_SPECIES_TARGETS_PATH}. "
+            f"Missing generated species targets: {targets_path}. "
             "Run scripts/fetch_by_order.py first."
         )
 
-    module_name = f"species_targets_generated_{safe_key(str(GENERATED_SPECIES_TARGETS_PATH))}"
-    spec = importlib.util.spec_from_file_location(module_name, GENERATED_SPECIES_TARGETS_PATH)
+    generated_targets = json.loads(targets_path.read_text(encoding="utf-8"))
 
-    if spec is None or spec.loader is None:
-        raise ImportError(
-            f"Could not import generated species targets: {GENERATED_SPECIES_TARGETS_PATH}"
-        )
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-
-    generated_targets = getattr(module, "SPECIES_TARGETS", None)
-
-    if generated_targets is None:
-        raise AttributeError(
-            f"{GENERATED_SPECIES_TARGETS_PATH} must define SPECIES_TARGETS."
-        )
+    if not isinstance(generated_targets, list):
+        raise ValueError(f"{targets_path} must contain a JSON list of species targets.")
 
     targets = [coerce_species_target(target) for target in generated_targets]
 
     if not targets:
-        raise ValueError("Generated SPECIES_TARGETS is empty.")
+        raise ValueError("Generated species target JSON is empty.")
 
     return targets
 
@@ -572,7 +564,7 @@ def resolve_species_targets(
             refresh=refresh_generated_targets,
             order=generated_order,
         )
-        targets = load_generated_species_targets()
+        targets = load_generated_species_targets(generated_order)
 
     seen: set[str] = set()
     duplicates: list[str] = []
