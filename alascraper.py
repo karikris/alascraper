@@ -359,6 +359,15 @@ class QueryPartition:
 
 
 @dataclass(frozen=True, slots=True)
+class QueryPartitionPlan:
+    partitions: list[QueryPartition]
+    coverage_status: str
+    coverage_detail: str | None
+    expected_total_records: int
+    planned_partition_records: int
+
+
+@dataclass(frozen=True, slots=True)
 class SpeciesResult:
     species_key: str
     scientific_name: str
@@ -371,6 +380,9 @@ class SpeciesResult:
     elapsed_seconds: float
     species_parquet_path: Path
     target_match_suspect: bool = False
+    partition_coverage_status: str = "complete"
+    partition_coverage_detail: str | None = None
+    planned_partition_records: int = 0
 
 
 _SESSION_LOCAL = threading.local()
@@ -1287,39 +1299,91 @@ def split_oversized_year_partitions(
     return out
 
 
-def make_query_partitions(target: SpeciesTarget, total_records: int) -> list[QueryPartition]:
+def first_window_partition(total_records: int) -> QueryPartition:
+    return QueryPartition(
+        label="all",
+        extra_fq_filters=(),
+        total_records=min(total_records, SEARCH_API_MAX_WINDOW),
+    )
+
+
+def make_query_partition_plan(target: SpeciesTarget, total_records: int) -> QueryPartitionPlan:
     if total_records <= SEARCH_API_MAX_WINDOW:
-        return [
-            QueryPartition(
-                label="all",
-                extra_fq_filters=(),
-                total_records=total_records,
-            )
-        ]
+        partitions = [first_window_partition(total_records)]
+        return QueryPartitionPlan(
+            partitions=partitions,
+            coverage_status="complete",
+            coverage_detail=None,
+            expected_total_records=total_records,
+            planned_partition_records=total_records,
+        )
 
     partitions = fetch_year_facet_partitions(target)
 
     if not partitions:
-        log(
-            f"Species={target.key}: warning: no year facets available; "
-            f"search API may return only first {SEARCH_API_MAX_WINDOW:,} rows."
+        detail = (
+            "no year facets available; only the first "
+            f"{SEARCH_API_MAX_WINDOW:,} unpartitioned rows can be fetched"
         )
-        return [
-            QueryPartition(
-                label="all",
-                extra_fq_filters=(),
-                total_records=min(total_records, SEARCH_API_MAX_WINDOW),
-            )
-        ]
+        log(f"Species={target.key}: warning: {detail}.")
+        fallback = first_window_partition(total_records)
+        return QueryPartitionPlan(
+            partitions=[fallback],
+            coverage_status="truncated_no_year_facets",
+            coverage_detail=detail,
+            expected_total_records=total_records,
+            planned_partition_records=fallback.total_records,
+        )
 
-    partitions = split_oversized_year_partitions(target, partitions)
+    try:
+        partitions = split_oversized_year_partitions(target, partitions)
+    except RuntimeError as exc:
+        detail = f"partition split failed: {exc}"
+        log(f"Species={target.key}: warning: {detail}")
+        fallback = first_window_partition(total_records)
+        return QueryPartitionPlan(
+            partitions=[fallback],
+            coverage_status="truncated_partition_split_failed",
+            coverage_detail=detail,
+            expected_total_records=total_records,
+            planned_partition_records=fallback.total_records,
+        )
 
     partition_total = sum(partition.total_records for partition in partitions)
     log(
         f"Species={target.key}: split {total_records:,} records into "
         f"{len(partitions):,} year partitions; partition_total={partition_total:,}"
     )
-    return partitions
+
+    if partition_total != total_records:
+        detail = (
+            f"year partition coverage total={partition_total:,}, "
+            f"expected={total_records:,}"
+        )
+        log(f"Species={target.key}: warning: {detail}.")
+
+        if partition_total < total_records:
+            partitions = [*partitions, first_window_partition(total_records)]
+
+        return QueryPartitionPlan(
+            partitions=partitions,
+            coverage_status="partition_total_mismatch",
+            coverage_detail=detail,
+            expected_total_records=total_records,
+            planned_partition_records=sum(partition.total_records for partition in partitions),
+        )
+
+    return QueryPartitionPlan(
+        partitions=partitions,
+        coverage_status="complete",
+        coverage_detail=None,
+        expected_total_records=total_records,
+        planned_partition_records=partition_total,
+    )
+
+
+def make_query_partitions(target: SpeciesTarget, total_records: int) -> list[QueryPartition]:
+    return make_query_partition_plan(target, total_records).partitions
 
 
 # =============================================================================
@@ -1658,6 +1722,9 @@ def write_manifest(
                 "query",
                 "fq_filters",
                 "reported_total_records",
+                "planned_partition_records",
+                "partition_coverage_status",
+                "partition_coverage_detail",
                 "pages_written",
                 "rows_written",
                 "elapsed_seconds",
@@ -1683,6 +1750,9 @@ def write_manifest(
                     "query": build_query(target),
                     "fq_filters": " | ".join(build_fq_filters(target)),
                     "reported_total_records": result.reported_total_records,
+                    "planned_partition_records": result.planned_partition_records,
+                    "partition_coverage_status": result.partition_coverage_status,
+                    "partition_coverage_detail": result.partition_coverage_detail or "",
                     "pages_written": result.pages_written,
                     "rows_written": result.rows_written,
                     "elapsed_seconds": f"{result.elapsed_seconds:.3f}",
@@ -1760,13 +1830,14 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
             elapsed_seconds=elapsed_seconds,
             species_parquet_path=empty_path,
             target_match_suspect=target.target_match_suspect,
+            planned_partition_records=0,
         )
 
-    partitions = make_query_partitions(target, total_records)
-    tasks = make_tasks(target, partitions)
+    partition_plan = make_query_partition_plan(target, total_records)
+    tasks = make_tasks(target, partition_plan.partitions)
     log(
         f"Species={target.key}: pages to fetch={len(tasks):,}; "
-        f"partitions={len(partitions):,}"
+        f"partitions={len(partition_plan.partitions):,}"
     )
 
     page_results = run_parallel_fetch_for_species(target, tasks)
@@ -1794,6 +1865,9 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
         elapsed_seconds=elapsed_seconds,
         species_parquet_path=merged_path,
         target_match_suspect=target.target_match_suspect,
+        partition_coverage_status=partition_plan.coverage_status,
+        partition_coverage_detail=partition_plan.coverage_detail,
+        planned_partition_records=partition_plan.planned_partition_records,
     )
 
 

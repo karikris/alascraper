@@ -1,20 +1,32 @@
 from __future__ import annotations
 
-import pytest
-
 import alascraper as a
 
 
-@pytest.mark.xfail(strict=True, reason="Known finding: missing facets still fall back to first search-window page.")
-def test_missing_year_facets_raise_for_full_runs(monkeypatch, target: a.SpeciesTarget) -> None:
+def test_missing_year_facets_are_reported_and_fetch_first_window(
+    monkeypatch,
+    target: a.SpeciesTarget,
+) -> None:
     monkeypatch.setattr(a, "fetch_year_facet_partitions", lambda _target: [])
 
-    with pytest.raises(RuntimeError, match="no year facets|truncate"):
-        a.make_query_partitions(target, a.SEARCH_API_MAX_WINDOW + 1)
+    plan = a.make_query_partition_plan(target, a.SEARCH_API_MAX_WINDOW + 1)
+
+    assert plan.coverage_status == "truncated_no_year_facets"
+    assert "no year facets" in (plan.coverage_detail or "")
+    assert plan.planned_partition_records == a.SEARCH_API_MAX_WINDOW
+    assert plan.partitions == [
+        a.QueryPartition(
+            label="all",
+            extra_fq_filters=(),
+            total_records=a.SEARCH_API_MAX_WINDOW,
+        )
+    ]
 
 
-@pytest.mark.xfail(strict=True, reason="Known finding: partition totals are logged but not enforced.")
-def test_partition_total_mismatch_raises(monkeypatch, target: a.SpeciesTarget) -> None:
+def test_partition_total_mismatch_is_reported_and_adds_salvage_window(
+    monkeypatch,
+    target: a.SpeciesTarget,
+) -> None:
     monkeypatch.setattr(
         a,
         "fetch_year_facet_partitions",
@@ -24,8 +36,19 @@ def test_partition_total_mismatch_raises(monkeypatch, target: a.SpeciesTarget) -
         ],
     )
 
-    with pytest.raises(RuntimeError, match="partition.*total|coverage"):
-        a.make_query_partitions(target, a.SEARCH_API_MAX_WINDOW + 1)
+    plan = a.make_query_partition_plan(target, a.SEARCH_API_MAX_WINDOW + 1)
+
+    assert plan.coverage_status == "partition_total_mismatch"
+    assert "coverage total" in (plan.coverage_detail or "")
+    assert plan.partitions == [
+        a.QueryPartition(label="year=2020", extra_fq_filters=("year:2020",), total_records=2_000),
+        a.QueryPartition(label="year=2021", extra_fq_filters=("year:2021",), total_records=2_000),
+        a.QueryPartition(
+            label="all",
+            extra_fq_filters=(),
+            total_records=a.SEARCH_API_MAX_WINDOW,
+        ),
+    ]
 
 
 def test_oversized_year_partition_splits_by_month(
