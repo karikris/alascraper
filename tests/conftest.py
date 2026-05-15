@@ -56,6 +56,7 @@ def make_record_row(
             "query_scientific_name": target.scientific_name,
             "query_common_name": target.common_name,
             "query_taxon_lsid": target.taxon_lsid,
+            "target_match_suspect": target.target_match_suspect,
             "uuid": uuid,
             "scientificName": scientific_name or target.scientific_name,
             "eventDate": event_date,

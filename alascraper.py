@@ -47,7 +47,7 @@ import shutil
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -79,6 +79,9 @@ class SpeciesTarget:
     scientific_name: str
     common_name: str | None = None
     taxon_lsid: str | None = None
+    source_order: str | None = None
+    facet_fq_filters: tuple[str, ...] = ()
+    target_match_suspect: bool = False
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -206,6 +209,7 @@ BASE_FIELDS = [
     "query_scientific_name",
     "query_common_name",
     "query_taxon_lsid",
+    "target_match_suspect",
     "uuid",
     "scientificName",
     "raw_scientificName",
@@ -268,6 +272,7 @@ FIELD_SCHEMA: dict[str, pl.DataType] = {
     "query_scientific_name": pl.Utf8,
     "query_common_name": pl.Utf8,
     "query_taxon_lsid": pl.Utf8,
+    "target_match_suspect": pl.Boolean,
     "uuid": pl.Utf8,
     "occurrenceID": pl.Utf8,
     "scientificName": pl.Utf8,
@@ -365,6 +370,7 @@ class SpeciesResult:
     rows_written: int
     elapsed_seconds: float
     species_parquet_path: Path
+    target_match_suspect: bool = False
 
 
 _SESSION_LOCAL = threading.local()
@@ -445,11 +451,27 @@ def coerce_species_target(value: SpeciesTarget | dict[str, Any]) -> SpeciesTarge
     if not key or not scientific_name:
         raise ValueError(f"Invalid generated species target: {value!r}")
 
+    raw_facet_fq = value.get("ala_facet_fq")
+
+    if isinstance(raw_facet_fq, str):
+        facet_fq_filters = tuple(
+            item.strip() for item in raw_facet_fq.split(" | ") if item.strip()
+        )
+    elif isinstance(raw_facet_fq, (list, tuple)):
+        facet_fq_filters = tuple(
+            str(item).strip() for item in raw_facet_fq if str(item).strip()
+        )
+    else:
+        facet_fq_filters = ()
+
     return SpeciesTarget(
         key=key,
         scientific_name=scientific_name,
         common_name=value.get("common_name"),
         taxon_lsid=value.get("taxon_lsid"),
+        source_order=normalise_text_cell(value.get("order")),
+        facet_fq_filters=facet_fq_filters,
+        target_match_suspect=bool(value.get("target_match_suspect", False)),
     )
 
 
@@ -673,6 +695,7 @@ def normalise_record(target: SpeciesTarget, record: dict[str, Any]) -> dict[str,
         "query_scientific_name": target.scientific_name,
         "query_common_name": target.common_name,
         "query_taxon_lsid": target.taxon_lsid,
+        "target_match_suspect": target.target_match_suspect,
     }
 
     for field in FIELDS:
@@ -746,19 +769,19 @@ def record_matches_query_name(target: SpeciesTarget, record: dict[str, Any]) -> 
     return False
 
 
-def warn_if_query_resolves_to_different_taxon(target: SpeciesTarget, data: dict[str, Any]) -> None:
+def warn_if_query_resolves_to_different_taxon(target: SpeciesTarget, data: dict[str, Any]) -> bool:
     if target.taxon_lsid:
-        return
+        return False
 
     records = data.get("occurrences", [])
 
     if not records:
-        return
+        return False
 
     first_record = records[0]
 
     if record_matches_query_name(target, first_record):
-        return
+        return False
 
     names = ", ".join(record_taxon_names(first_record)) or "unknown"
     log(
@@ -766,6 +789,7 @@ def warn_if_query_resolves_to_different_taxon(target: SpeciesTarget, data: dict[
         f"resolved first record to different ALA taxon/name(s): {names}. "
         "Prefer a taxon_lsid when strict taxonomy is required."
     )
+    return True
 
 
 # =============================================================================
@@ -781,7 +805,17 @@ def build_query(target: SpeciesTarget) -> str:
     if target.taxon_lsid:
         return f"lsid:{target.taxon_lsid}"
 
+    if target.facet_fq_filters:
+        return "*:*"
+
     return target.scientific_name
+
+
+def joined_facet_filter(filters: tuple[str, ...]) -> str:
+    if len(filters) == 1:
+        return filters[0]
+
+    return "(" + " OR ".join(filters) + ")"
 
 
 def build_fq_filters(target: SpeciesTarget) -> list[str]:
@@ -789,6 +823,13 @@ def build_fq_filters(target: SpeciesTarget) -> list[str]:
 
     if COUNTRY_FILTER_ENABLED:
         filters.append(COUNTRY_FILTER)
+
+    if target.source_order:
+        filters.append(quote_fq("order", target.source_order))
+
+    if target.facet_fq_filters:
+        filters.append(joined_facet_filter(target.facet_fq_filters))
+        return filters
 
     add_exact_taxon = (
         (target.taxon_lsid is None and EXACT_TAXON_NAME_FILTER_WHEN_NO_LSID)
@@ -875,6 +916,8 @@ def species_run_config(target: SpeciesTarget) -> dict[str, Any]:
             "scientific_name": target.scientific_name,
             "common_name": target.common_name,
             "taxon_lsid": target.taxon_lsid,
+            "source_order": target.source_order,
+            "facet_fq_filters": list(target.facet_fq_filters),
         },
     }
 
@@ -1057,17 +1100,18 @@ def fetch_total_records(
     target: SpeciesTarget,
     extra_fq_filters: tuple[str, ...] = (),
     warn_on_taxon_resolution: bool = True,
-) -> int:
+) -> tuple[int, bool]:
     data = fetch_json(target=target, start=0, page_size=1, extra_fq_filters=extra_fq_filters)
     total = int(data.get("totalRecords", 0))
+    target_match_suspect = False
 
     if warn_on_taxon_resolution:
-        warn_if_query_resolves_to_different_taxon(target, data)
+        target_match_suspect = warn_if_query_resolves_to_different_taxon(target, data)
 
     if MAX_RECORDS_PER_SPECIES is not None:
         total = min(total, MAX_RECORDS_PER_SPECIES)
 
-    return total
+    return total, target_match_suspect
 
 
 def fetch_facet_partitions(
@@ -1609,6 +1653,7 @@ def write_manifest(
                 "scientific_name",
                 "common_name",
                 "taxon_lsid",
+                "target_match_suspect",
                 "config_fingerprint",
                 "query",
                 "fq_filters",
@@ -1633,6 +1678,7 @@ def write_manifest(
                     "scientific_name": result.scientific_name,
                     "common_name": result.common_name or "",
                     "taxon_lsid": result.taxon_lsid or "",
+                    "target_match_suspect": result.target_match_suspect,
                     "config_fingerprint": result.config_fingerprint,
                     "query": build_query(target),
                     "fq_filters": " | ".join(build_fq_filters(target)),
@@ -1686,7 +1732,11 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
         else:
             log("No LSID supplied; using scientific-name query without exact taxon_name filter.")
 
-    total_records = fetch_total_records(target)
+    total_records, target_match_suspect = fetch_total_records(target)
+
+    if target_match_suspect:
+        target = replace(target, target_match_suspect=True)
+
     log(f"Species={target.key}: ALA reported total records={total_records:,}")
 
     if total_records <= 0:
@@ -1709,6 +1759,7 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
             rows_written=0,
             elapsed_seconds=elapsed_seconds,
             species_parquet_path=empty_path,
+            target_match_suspect=target.target_match_suspect,
         )
 
     partitions = make_query_partitions(target, total_records)
@@ -1742,6 +1793,7 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
         rows_written=rows_written,
         elapsed_seconds=elapsed_seconds,
         species_parquet_path=merged_path,
+        target_match_suspect=target.target_match_suspect,
     )
 
 

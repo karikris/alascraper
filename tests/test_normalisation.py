@@ -65,6 +65,7 @@ def test_normalise_record_handles_missing_and_extra_ala_fields(target: a.Species
     assert set(row) == set(a.FIELDS)
     assert row["query_species_key"] == target.key
     assert row["query_scientific_name"] == target.scientific_name
+    assert row["target_match_suspect"] is False
     assert row["uuid"] == "record-1"
     assert row["decimalLatitude"] == -37.81
     assert row["decimalLongitude"] == 144.96
@@ -73,3 +74,15 @@ def test_normalise_record_handles_missing_and_extra_ala_fields(target: a.Species
     assert row["spatiallyValid"] is True
     assert row["vernacularName"] is None
     assert "unusedExtraField" not in row
+
+
+def test_normalise_record_preserves_suspect_target_flag() -> None:
+    target = a.SpeciesTarget(
+        key="suspect_species",
+        scientific_name="Suspecta species",
+        target_match_suspect=True,
+    )
+
+    row = a.normalise_record(target, {"uuid": "record-1"})
+
+    assert row["target_match_suspect"] is True

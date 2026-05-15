@@ -11,6 +11,22 @@ def test_build_query_uses_lsid_when_available(lsid_target: a.SpeciesTarget) -> N
     assert a.build_query(lsid_target) == f"lsid:{lsid_target.taxon_lsid}"
 
 
+def test_generated_target_uses_exact_facet_query() -> None:
+    target = a.SpeciesTarget(
+        key="poa_annua",
+        scientific_name="Poa annua",
+        source_order="Poales",
+        facet_fq_filters=('species:"Poa annua"', 'subspecies:"Poa annua"'),
+    )
+
+    assert a.build_query(target) == "*:*"
+    assert a.build_fq_filters(target) == [
+        'country:"Australia"',
+        'order:"Poales"',
+        '(species:"Poa annua" OR subspecies:"Poa annua")',
+    ]
+
+
 def test_build_fq_filters_includes_country_by_default(monkeypatch, target: a.SpeciesTarget) -> None:
     monkeypatch.setattr(a, "COUNTRY_FILTER_ENABLED", True)
     monkeypatch.setattr(a, "COUNTRY_FILTER", 'country:"Australia"')

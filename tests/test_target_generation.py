@@ -12,6 +12,8 @@ def test_coerce_species_target_accepts_generated_dict() -> None:
             "scientific_name": "Papilio aegeus",
             "common_name": "Orchard Swallowtail",
             "taxon_lsid": "urn:lsid:test",
+            "order": "Lepidoptera",
+            "ala_facet_fq": 'species:"Papilio aegeus" | subspecies:"Papilio aegeus"',
         }
     )
 
@@ -20,6 +22,11 @@ def test_coerce_species_target_accepts_generated_dict() -> None:
         scientific_name="Papilio aegeus",
         common_name="Orchard Swallowtail",
         taxon_lsid="urn:lsid:test",
+        source_order="Lepidoptera",
+        facet_fq_filters=(
+            'species:"Papilio aegeus"',
+            'subspecies:"Papilio aegeus"',
+        ),
     )
 
 
@@ -35,7 +42,8 @@ def test_load_generated_species_targets_imports_generated_module(monkeypatch, tm
     generated_path.write_text(
         "SPECIES_TARGETS = ["
         "{'key': 'papilio_aegeus', 'scientific_name': 'Papilio aegeus', "
-        "'common_name': None, 'taxon_lsid': None}"
+        "'common_name': None, 'taxon_lsid': None, 'order': 'Lepidoptera', "
+        "'ala_facet_fq': 'species:\"Papilio aegeus\"'}"
         "]\n",
         encoding="utf-8",
     )
@@ -51,6 +59,8 @@ def test_load_generated_species_targets_imports_generated_module(monkeypatch, tm
             scientific_name="Papilio aegeus",
             common_name=None,
             taxon_lsid=None,
+            source_order="Lepidoptera",
+            facet_fq_filters=('species:"Papilio aegeus"',),
         )
     ]
 
