@@ -17,7 +17,13 @@ def test_run_continues_after_species_failure(
     monkeypatch.setattr(a, "prepare_output_dirs", lambda: None)
     monkeypatch.setattr(a.time, "sleep", lambda _seconds: None)
 
-    def fake_fetch_one_species(current: a.SpeciesTarget) -> a.SpeciesResult:
+    def fake_fetch_one_species(
+        current: a.SpeciesTarget,
+        *,
+        page_workers: int | None = None,
+    ) -> a.SpeciesResult:
+        assert page_workers == a.worker_layout().page_workers_per_taxon
+
         if current.key == target.key:
             raise RuntimeError("temporary upstream failure")
 

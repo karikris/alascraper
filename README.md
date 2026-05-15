@@ -107,6 +107,13 @@ Edit these in `constants.py` for normal runs:
 
 ```python
 WORKERS = 16
+TAXON_LANE_LAYOUTS = {
+    16: (8, 2),
+    12: (6, 2),
+    8: (8, 1),
+    4: (4, 1),
+    2: (2, 1),
+}
 MAX_RECORDS_PER_SPECIES = None
 WRITE_CSV = False
 FRESH_RUN = False
@@ -115,6 +122,8 @@ DATASETS_ROOT = Path("datasets")
 
 Set `MAX_RECORDS_PER_SPECIES` to a small number for test runs. Leave it as
 `None` for full species exports.
+
+`TAXON_LANE_LAYOUTS` maps total workers to `(concurrent_taxa, page_workers_per_taxon)`.
 
 ## Outputs
 

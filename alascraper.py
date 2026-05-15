@@ -24,7 +24,7 @@ Design:
   - If a species has an ALA LSID, q=lsid:<LSID> is used.
   - If no LSID is supplied, q=<scientific_name> is used without an exact
     taxon_name filter by default, because ALA can normalise accepted names.
-  - Each species is fetched page-by-page in parallel.
+  - Multiple taxa can be fetched concurrently, each with bounded page workers.
   - Each species gets its own Parquet folder.
   - DuckDB merges all species Parquet files into one final all-species Parquet.
   - CSV output is optional and disabled by default.
@@ -89,6 +89,7 @@ from constants import (
     SCHEMA,
     SEARCH_API_MAX_WINDOW,
     START_PARAM_NAME,
+    TAXON_LANE_LAYOUTS,
     TIMEOUT_SECONDS,
     USER_AGENT,
     WORKERS,
@@ -184,6 +185,13 @@ class QueryPartitionPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerLayout:
+    total_workers: int
+    taxon_lanes: int
+    page_workers_per_taxon: int
+
+
+@dataclass(frozen=True, slots=True)
 class SpeciesResult:
     species_key: str
     scientific_name: str
@@ -208,6 +216,9 @@ class SpeciesResult:
 _SESSION_LOCAL = threading.local()
 _SESSION_REGISTRY_LOCK = threading.Lock()
 _SESSION_REGISTRY: list[requests.Session] = []
+_REQUEST_SEMAPHORE_LOCK = threading.Lock()
+_REQUEST_SEMAPHORE: tuple[int, threading.BoundedSemaphore] | None = None
+_LOG_LOCK = threading.Lock()
 
 
 # =============================================================================
@@ -434,11 +445,12 @@ def utc_now() -> str:
 
 
 def log(message: str) -> None:
-    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    line = f"[{utc_now()}] {message}"
-    print(line, flush=True)
-    with RUN_LOG_PATH.open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
+    with _LOG_LOCK:
+        OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+        line = f"[{utc_now()}] {message}"
+        print(line, flush=True)
+        with RUN_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
 
 
 def format_duration(seconds: float) -> str:
@@ -452,6 +464,31 @@ def format_duration(seconds: float) -> str:
         return f"{int(minutes)}m {remainder:.1f}s"
 
     return f"{remainder:.1f}s"
+
+
+def worker_layout(total_workers: int = WORKERS) -> WorkerLayout:
+    if total_workers <= 0:
+        raise ValueError("WORKERS must be positive.")
+
+    taxon_lanes, page_workers_per_taxon = TAXON_LANE_LAYOUTS.get(
+        total_workers,
+        (1, total_workers),
+    )
+
+    if taxon_lanes <= 0 or page_workers_per_taxon <= 0:
+        raise ValueError("Taxon lane layout values must be positive.")
+
+    if taxon_lanes * page_workers_per_taxon > total_workers:
+        raise ValueError(
+            "Taxon lane layout must not exceed total workers: "
+            f"{taxon_lanes} x {page_workers_per_taxon} > {total_workers}."
+        )
+
+    return WorkerLayout(
+        total_workers=total_workers,
+        taxon_lanes=taxon_lanes,
+        page_workers_per_taxon=page_workers_per_taxon,
+    )
 
 
 # =============================================================================
@@ -882,6 +919,16 @@ def close_all_sessions() -> None:
 atexit.register(close_all_sessions)
 
 
+def request_semaphore() -> threading.BoundedSemaphore:
+    global _REQUEST_SEMAPHORE
+
+    with _REQUEST_SEMAPHORE_LOCK:
+        if _REQUEST_SEMAPHORE is None or _REQUEST_SEMAPHORE[0] != WORKERS:
+            _REQUEST_SEMAPHORE = (WORKERS, threading.BoundedSemaphore(WORKERS))
+
+        return _REQUEST_SEMAPHORE[1]
+
+
 def request_json_with_retries(
     *,
     session: requests.Session,
@@ -892,7 +939,8 @@ def request_json_with_retries(
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = session.get(API_URL, params=params, timeout=TIMEOUT_SECONDS)
+            with request_semaphore():
+                response = session.get(API_URL, params=params, timeout=TIMEOUT_SECONDS)
 
             if response.status_code == 429:
                 wait = min(120, 10 * attempt)
@@ -1338,10 +1386,16 @@ def make_tasks(target: SpeciesTarget, partitions: list[QueryPartition]) -> list[
     return tasks
 
 
-def run_parallel_fetch_for_species(target: SpeciesTarget, tasks: list[PageTask]) -> list[PageResult]:
+def run_parallel_fetch_for_species(
+    target: SpeciesTarget,
+    tasks: list[PageTask],
+    *,
+    page_workers: int | None = None,
+) -> list[PageResult]:
     if not tasks:
         return []
 
+    page_workers = page_workers or worker_layout().page_workers_per_taxon
     results: list[PageResult] = []
     pending_tasks = iter(tasks)
     in_flight: dict[cf.Future[PageResult], PageTask] = {}
@@ -1356,8 +1410,13 @@ def run_parallel_fetch_for_species(target: SpeciesTarget, tasks: list[PageTask])
         in_flight[future] = task
         return True
 
-    with cf.ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix=f"ala_{target.key}") as executor:
-        for _ in range(min(MAX_IN_FLIGHT_TASKS, len(tasks))):
+    with cf.ThreadPoolExecutor(
+        max_workers=page_workers,
+        thread_name_prefix=f"ala_{target.key}",
+    ) as executor:
+        max_in_flight = min(MAX_IN_FLIGHT_TASKS, page_workers * 3)
+
+        for _ in range(min(max_in_flight, len(tasks))):
             submit_next(executor)
 
         completed = 0
@@ -1690,7 +1749,11 @@ def validate_run_settings() -> None:
         )
 
 
-def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
+def fetch_one_species(
+    target: SpeciesTarget,
+    *,
+    page_workers: int | None = None,
+) -> SpeciesResult:
     species_started = time.perf_counter()
     log("=" * 80)
     log(f"Starting species={target.key} | scientific_name={target.scientific_name}")
@@ -1743,7 +1806,11 @@ def fetch_one_species(target: SpeciesTarget) -> SpeciesResult:
         f"partitions={len(partition_plan.partitions):,}"
     )
 
-    page_results = run_parallel_fetch_for_species(target, tasks)
+    page_results = run_parallel_fetch_for_species(
+        target,
+        tasks,
+        page_workers=page_workers,
+    )
     rows_written = sum(result.count for result in page_results)
     page_validation_issues = [
         result for result in page_results if result.validation_status != "complete"
@@ -1806,6 +1873,63 @@ def failed_species_result(target: SpeciesTarget, error: Exception) -> SpeciesRes
     )
 
 
+def run_parallel_fetch_for_targets(
+    targets: list[SpeciesTarget],
+    layout: WorkerLayout,
+) -> list[SpeciesResult]:
+    if not targets:
+        return []
+
+    pending_targets = iter(enumerate(targets))
+    ordered_results: dict[int, SpeciesResult] = {}
+    in_flight: dict[cf.Future[SpeciesResult], tuple[int, SpeciesTarget]] = {}
+
+    def submit_next(executor: cf.ThreadPoolExecutor) -> bool:
+        try:
+            index, target = next(pending_targets)
+        except StopIteration:
+            return False
+
+        future = executor.submit(
+            fetch_one_species,
+            target,
+            page_workers=layout.page_workers_per_taxon,
+        )
+        in_flight[future] = (index, target)
+        return True
+
+    with cf.ThreadPoolExecutor(
+        max_workers=layout.taxon_lanes,
+        thread_name_prefix="ala_taxon",
+    ) as executor:
+        for _ in range(min(layout.taxon_lanes, len(targets))):
+            submit_next(executor)
+
+        while in_flight:
+            done, _ = cf.wait(in_flight.keys(), return_when=cf.FIRST_COMPLETED)
+
+            for future in done:
+                index, target = in_flight.pop(future)
+
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    log(
+                        f"Species={target.key}: failed after retries; continuing with next "
+                        f"target. error={exc}"
+                    )
+                    result = failed_species_result(target, exc)
+
+                ordered_results[index] = result
+
+                if in_flight or index + 1 < len(targets):
+                    time.sleep(REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES)
+
+                submit_next(executor)
+
+    return [ordered_results[index] for index in range(len(targets))]
+
+
 def run_alascraper(
     *,
     species_targets: list[SpeciesTarget | dict[str, Any]] | None = None,
@@ -1843,26 +1967,18 @@ def run_alascraper(
     log(f"Dataset class: {dataset_class or 'misc'}")
     if order is not None:
         log(f"Generated target order: {order}")
+    layout = worker_layout()
     log(f"Species targets: {len(active_targets):,}")
     log(f"Workers: {WORKERS}")
+    log(
+        f"Taxon lanes: {layout.taxon_lanes}; "
+        f"page workers per taxon: {layout.page_workers_per_taxon}"
+    )
     log(f"Page size: {PAGE_SIZE}")
     log(f"CSV output enabled: {WRITE_CSV}")
     log(f"User-data fields enabled: {INCLUDE_USER_DATA_FIELDS}")
 
-    species_results: list[SpeciesResult] = []
-
-    for target in active_targets:
-        try:
-            result = fetch_one_species(target)
-        except Exception as exc:
-            log(
-                f"Species={target.key}: failed after retries; continuing with next "
-                f"target. error={exc}"
-            )
-            result = failed_species_result(target, exc)
-
-        species_results.append(result)
-        time.sleep(REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES)
+    species_results = run_parallel_fetch_for_targets(active_targets, layout)
 
     write_manifest(species_results, active_targets)
     merge_all_species(species_results)
