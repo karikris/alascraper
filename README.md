@@ -106,7 +106,7 @@ raise SystemExit(
 Edit these in `constants.py` for normal runs:
 
 ```python
-WORKERS = 12
+WORKERS = 16
 MAX_RECORDS_PER_SPECIES = None
 WRITE_CSV = False
 FRESH_RUN = False
