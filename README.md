@@ -41,19 +41,19 @@ list from `scripts/fetch_by_order.py`, then fetches occurrences for each
 species. `scripts/fetch_by_order.py` defaults to Australian ALA records in the
 order `Lepidoptera`.
 
-Choose the dataset class and order at runtime:
+Choose the dataset class folder and order at runtime:
 
 ```bash
-.venv/bin/python alascraper.py --class insecta --order Lepidoptera
+.venv/bin/python alascraper.py --dataset-class insecta --order Lepidoptera
 ```
 
-If `--class` is omitted, the run writes under `datasets/misc/<order>/`.
+If `--dataset-class` is omitted, the run writes under `datasets/misc/<order>/`.
 
 CSV output is off by default. Add the optional final boolean only when you need
 CSV next to Parquet:
 
 ```bash
-.venv/bin/python alascraper.py --class insecta --order Lepidoptera TRUE
+.venv/bin/python alascraper.py --dataset-class insecta --order Lepidoptera TRUE
 ```
 
 Use `FALSE` or omit the final argument to keep CSV disabled.
@@ -61,8 +61,20 @@ Use `FALSE` or omit the final argument to keep CSV disabled.
 For Poales:
 
 ```bash
-.venv/bin/python alascraper.py --class monocot --order Poales
+.venv/bin/python alascraper.py --dataset-class monocot --order Poales
 ```
+
+## Run a Class Workflow
+
+Use `--class` for an ALA taxonomic class facet. For birds, this discovers
+Australian ALA orders and families under `class:"Aves"`, then writes
+family-level Parquet outputs under `datasets/aves/<order>/<family>/`.
+
+```bash
+.venv/bin/python alascraper.py --class Aves
+```
+
+Use `--dataset-class` only when you want to override the top-level output folder.
 
 ## Run Family Outputs
 
@@ -70,8 +82,8 @@ Use `--family` to fetch one or more ALA family facets into family-level Parquet
 outputs. Values may be repeated or comma-separated.
 
 ```bash
-.venv/bin/python alascraper.py --class insecta --order Lepidoptera --family Nymphalidae
-.venv/bin/python alascraper.py --class insecta --order Lepidoptera --family Nymphalidae,Lycaenidae
+.venv/bin/python alascraper.py --dataset-class insecta --order Lepidoptera --family Nymphalidae
+.venv/bin/python alascraper.py --dataset-class insecta --order Lepidoptera --family Nymphalidae,Lycaenidae
 ```
 
 Use `--butterflies` for the six Australian butterfly families under
@@ -79,7 +91,7 @@ Lepidoptera: Hesperiidae, Papilionidae, Pieridae, Nymphalidae, Riodinidae, and
 Lycaenidae.
 
 ```bash
-.venv/bin/python alascraper.py --class insecta --order Lepidoptera --butterflies
+.venv/bin/python alascraper.py --dataset-class insecta --order Lepidoptera --butterflies
 ```
 
 ## Generate Targets for Another Order
@@ -91,7 +103,7 @@ for another ALA order before running the occurrence scraper.
 .venv/bin/python scripts/fetch_by_order.py \
   --order Neuroptera \
   --output-dir datasets/insecta/neuroptera
-.venv/bin/python alascraper.py --class insecta --order Neuroptera
+.venv/bin/python alascraper.py --dataset-class insecta --order Neuroptera
 ```
 
 The generator writes order-specific review files such as

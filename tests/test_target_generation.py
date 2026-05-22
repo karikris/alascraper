@@ -12,6 +12,7 @@ def test_coerce_species_target_accepts_generated_dict() -> None:
             "scientific_name": "Papilio aegeus",
             "common_name": "Orchard Swallowtail",
             "taxon_lsid": "urn:lsid:test",
+            "class": "Insecta",
             "order": "Lepidoptera",
             "ala_facet_fq": 'species:"Papilio aegeus" | subspecies:"Papilio aegeus"',
         }
@@ -22,6 +23,7 @@ def test_coerce_species_target_accepts_generated_dict() -> None:
         scientific_name="Papilio aegeus",
         common_name="Orchard Swallowtail",
         taxon_lsid="urn:lsid:test",
+        source_class="Insecta",
         source_order="Lepidoptera",
         facet_fq_filters=(
             'species:"Papilio aegeus"',
@@ -75,12 +77,20 @@ def test_resolve_species_targets_rejects_duplicate_keys() -> None:
         )
 
 
-def test_alascraper_cli_accepts_order_and_csv_toggle() -> None:
-    args = a.parse_args(["--class", "insecta", "--order", "Lepidoptera", "TRUE"])
+def test_alascraper_cli_accepts_dataset_class_order_and_csv_toggle() -> None:
+    args = a.parse_args(["--dataset-class", "insecta", "--order", "Lepidoptera", "TRUE"])
 
     assert args.dataset_class == "insecta"
+    assert args.taxon_class is None
     assert args.order == "Lepidoptera"
     assert args.write_csv is True
+
+
+def test_alascraper_cli_accepts_taxon_class() -> None:
+    args = a.parse_args(["--class", "Aves"])
+
+    assert args.taxon_class == "Aves"
+    assert args.dataset_class is None
 
 
 def test_alascraper_cli_defaults_csv_toggle_to_none() -> None:
@@ -102,28 +112,59 @@ def test_dataset_output_root_defaults_missing_class_to_misc() -> None:
     )
 
 
-def test_alascraper_main_passes_order_and_csv_toggle(monkeypatch) -> None:
+def test_alascraper_main_passes_order_dataset_class_and_csv_toggle(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_run_alascraper(
         *,
         order: str | None,
         dataset_class: str | None,
+        taxon_class: str | None,
         write_csv: bool | None,
         **kwargs: object,
     ) -> int:
         captured["order"] = order
         captured["dataset_class"] = dataset_class
+        captured["taxon_class"] = taxon_class
         captured["write_csv"] = write_csv
         return 0
 
     monkeypatch.setattr(a, "run_alascraper", fake_run_alascraper)
 
-    assert a.main(["--class", "insecta", "--order", "Lepidoptera", "TRUE"]) == 0
+    assert a.main(["--dataset-class", "insecta", "--order", "Lepidoptera", "TRUE"]) == 0
     assert captured == {
         "order": "Lepidoptera",
         "dataset_class": "insecta",
+        "taxon_class": None,
         "write_csv": True,
+    }
+
+
+def test_alascraper_main_passes_taxon_class(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_alascraper(
+        *,
+        order: str | None,
+        dataset_class: str | None,
+        taxon_class: str | None,
+        write_csv: bool | None,
+        **kwargs: object,
+    ) -> int:
+        captured["order"] = order
+        captured["dataset_class"] = dataset_class
+        captured["taxon_class"] = taxon_class
+        captured["write_csv"] = write_csv
+        return 0
+
+    monkeypatch.setattr(a, "run_alascraper", fake_run_alascraper)
+
+    assert a.main(["--class", "Aves", "FALSE"]) == 0
+    assert captured == {
+        "order": None,
+        "dataset_class": None,
+        "taxon_class": "Aves",
+        "write_csv": False,
     }
 
 

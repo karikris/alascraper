@@ -40,6 +40,31 @@ def test_family_scoped_target_params_include_country_order_and_family() -> None:
     assert ("facets", "species") in params
 
 
+def test_class_scoped_order_facet_params_include_country_and_class() -> None:
+    params = a.build_class_order_facet_params("Aves")
+
+    assert ("q", "*:*") in params
+    assert ("fq", 'country:"Australia"') in params
+    assert ("fq", 'class:"Aves"') in params
+    assert ("facets", "order") in params
+
+
+def test_class_scoped_family_target_params_include_country_class_order_and_family() -> None:
+    params = a.build_family_target_params(
+        "Psittaciformes",
+        "Psittacidae",
+        "species",
+        taxon_class="Aves",
+    )
+
+    assert ("q", "*:*") in params
+    assert ("fq", 'country:"Australia"') in params
+    assert ("fq", 'class:"Aves"') in params
+    assert ("fq", 'order:"Psittaciformes"') in params
+    assert ("fq", 'family:"Psittacidae"') in params
+    assert ("facets", "species") in params
+
+
 def test_family_target_filters_include_country_order_family_and_facet() -> None:
     target = a.SpeciesTarget(
         key="danaus_plexippus",
@@ -58,6 +83,26 @@ def test_family_target_filters_include_country_order_family_and_facet() -> None:
     ]
 
 
+def test_class_family_target_filters_include_country_class_order_family_and_facet() -> None:
+    target = a.SpeciesTarget(
+        key="platycercus_eximius",
+        scientific_name="Platycercus eximius",
+        source_class="Aves",
+        source_order="Psittaciformes",
+        source_family="Psittacidae",
+        facet_fq_filters=('species:"Platycercus eximius"',),
+    )
+
+    assert a.build_query(target) == "*:*"
+    assert a.build_fq_filters(target) == [
+        'country:"Australia"',
+        'class:"Aves"',
+        'order:"Psittaciformes"',
+        'family:"Psittacidae"',
+        'species:"Platycercus eximius"',
+    ]
+
+
 def test_family_parquet_path_uses_class_order_family() -> None:
     assert a.family_parquet_path("Lepidoptera", "insecta", "Nymphalidae") == (
         a.DATASETS_ROOT
@@ -66,6 +111,95 @@ def test_family_parquet_path_uses_class_order_family() -> None:
         / "nymphalidae"
         / "nymphalidae.parquet"
     )
+
+
+def test_class_workflow_discovers_orders_and_families_and_writes_class_order_family_output(
+    monkeypatch,
+    tmp_path: Path,
+    target: a.SpeciesTarget,
+    record_row,
+) -> None:
+    datasets_root = tmp_path / "datasets"
+    bird_target = a.SpeciesTarget(
+        key=target.key,
+        scientific_name=target.scientific_name,
+        common_name=target.common_name,
+        source_class="Aves",
+        source_order="Psittaciformes",
+        source_family="Psittacidae",
+        facet_fq_filters=('species:"Testus species"',),
+    )
+
+    monkeypatch.setattr(a, "DATASETS_ROOT", datasets_root)
+    monkeypatch.setattr(a, "discover_class_orders", lambda taxon_class: ["Psittaciformes"])
+    monkeypatch.setattr(
+        a,
+        "discover_order_families",
+        lambda taxon_class, order: ["Psittacidae"],
+    )
+    monkeypatch.setattr(
+        a,
+        "generate_family_species_targets",
+        lambda order, family, taxon_class=None: [bird_target],
+    )
+    monkeypatch.setattr(a, "WORKERS", 1)
+    monkeypatch.setattr(a, "REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES", 0)
+
+    def fake_run_parallel_fetch_for_targets(
+        targets: list[a.SpeciesTarget],
+        _layout: a.WorkerLayout,
+    ) -> list[a.SpeciesResult]:
+        output = a.species_parquet_path(targets[0])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(
+            [record_row(targets[0], uuid="u1", event_date=1)],
+            schema=a.SCHEMA,
+            orient="row",
+        ).write_parquet(output)
+        return [
+            a.SpeciesResult(
+                species_key=targets[0].key,
+                scientific_name=targets[0].scientific_name,
+                common_name=targets[0].common_name,
+                taxon_lsid=targets[0].taxon_lsid,
+                config_fingerprint="fp",
+                reported_total_records=1,
+                pages_written=1,
+                rows_written=1,
+                elapsed_seconds=0.1,
+                species_parquet_path=output,
+            )
+        ]
+
+    monkeypatch.setattr(
+        a,
+        "run_parallel_fetch_for_targets",
+        fake_run_parallel_fetch_for_targets,
+    )
+
+    assert (
+        a.run_class_occurrence_workflow(
+            taxon_class="Aves",
+            dataset_class=None,
+            write_csv=False,
+        )
+        == 0
+    )
+
+    family_dir = datasets_root / "aves" / "psittaciformes" / "psittacidae"
+    assert (family_dir / "psittacidae.parquet").exists()
+    metadata = json.loads((family_dir / "metadata.json").read_text(encoding="utf-8"))
+
+    assert metadata["taxon_class"] == "Aves"
+    assert metadata["order"] == "Psittaciformes"
+    assert metadata["family"] == "Psittacidae"
+    assert metadata["target_generation"]["fq_filters"] == [
+        'country:"Australia"',
+        'class:"Aves"',
+        'order:"Psittaciformes"',
+        'family:"Psittacidae"',
+    ]
+    assert not (family_dir / ".scratch").exists()
 
 
 def test_family_metadata_contains_query_config_fetch_and_dedupe_fields(
@@ -140,7 +274,11 @@ def test_family_workflow_removes_scratch_and_leaves_only_visible_outputs(
     )
 
     monkeypatch.setattr(a, "DATASETS_ROOT", datasets_root)
-    monkeypatch.setattr(a, "generate_family_species_targets", lambda order, family: [family_target])
+    monkeypatch.setattr(
+        a,
+        "generate_family_species_targets",
+        lambda order, family, taxon_class=None: [family_target],
+    )
     monkeypatch.setattr(a, "WORKERS", 1)
     monkeypatch.setattr(a, "REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES", 0)
 

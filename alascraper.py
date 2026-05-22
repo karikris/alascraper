@@ -51,7 +51,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import duckdb
 import polars as pl
@@ -132,6 +132,7 @@ class SpeciesTarget:
     scientific_name: str
     common_name: str | None = None
     taxon_lsid: str | None = None
+    source_class: str | None = None
     source_order: str | None = None
     source_family: str | None = None
     facet_fq_filters: tuple[str, ...] = ()
@@ -373,6 +374,7 @@ def coerce_species_target(value: SpeciesTarget | dict[str, Any]) -> SpeciesTarge
         scientific_name=scientific_name,
         common_name=value.get("common_name"),
         taxon_lsid=value.get("taxon_lsid"),
+        source_class=normalise_text_cell(value.get("class") or value.get("taxon_class")) or None,
         source_order=normalise_text_cell(value.get("order")) or None,
         source_family=normalise_text_cell(value.get("family")) or None,
         facet_fq_filters=facet_fq_filters,
@@ -745,6 +747,9 @@ def build_fq_filters(target: SpeciesTarget) -> list[str]:
     if COUNTRY_FILTER_ENABLED:
         filters.append(COUNTRY_FILTER)
 
+    if target.source_class:
+        filters.append(quote_fq("class", target.source_class))
+
     if target.source_order:
         filters.append(quote_fq("order", target.source_order))
 
@@ -841,6 +846,7 @@ def species_run_config(target: SpeciesTarget) -> dict[str, Any]:
             "scientific_name": target.scientific_name,
             "common_name": target.common_name,
             "taxon_lsid": target.taxon_lsid,
+            "source_class": target.source_class,
             "source_order": target.source_order,
             "source_family": target.source_family,
             "facet_fq_filters": list(target.facet_fq_filters),
@@ -1066,6 +1072,8 @@ def build_family_target_params(
     family: str,
     facet_field: str,
     facet_offset: int = 0,
+    *,
+    taxon_class: str | None = None,
 ) -> list[tuple[str, str | int]]:
     params: list[tuple[str, str | int]] = [
         ("q", "*:*"),
@@ -1082,6 +1090,9 @@ def build_family_target_params(
     if COUNTRY_FILTER_ENABLED:
         params.append(("fq", COUNTRY_FILTER))
 
+    if taxon_class:
+        params.append(("fq", quote_fq("class", taxon_class)))
+
     params.extend(
         [
             ("fq", quote_fq("order", order)),
@@ -1096,12 +1107,20 @@ def fetch_family_facet_rows(
     order: str,
     family: str,
     facet_field: str,
+    *,
+    taxon_class: str | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     facet_offset = 0
 
     while True:
-        params = build_family_target_params(order, family, facet_field, facet_offset)
+        params = build_family_target_params(
+            order,
+            family,
+            facet_field,
+            facet_offset,
+            taxon_class=taxon_class,
+        )
         data = request_json_with_retries(
             session=get_thread_session(),
             params=params,
@@ -1128,6 +1147,7 @@ def fetch_family_facet_rows(
                     {
                         "species_key": safe_key(scientific_name),
                         "scientific_name": scientific_name,
+                        "class": taxon_class,
                         "order": order,
                         "family": family,
                         "facet_field": facet_field,
@@ -1158,6 +1178,7 @@ def merge_family_target_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             merged[name] = {
                 "species_key": safe_key(name),
                 "scientific_name": name,
+                "class": row.get("class"),
                 "order": row["order"],
                 "family": row["family"],
                 "facet_fields": set(),
@@ -1176,6 +1197,7 @@ def merge_family_target_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             {
                 "key": item["species_key"],
                 "scientific_name": item["scientific_name"],
+                "class": item["class"],
                 "order": item["order"],
                 "family": item["family"],
                 "facet_fields": " | ".join(sorted(item["facet_fields"])),
@@ -1187,12 +1209,22 @@ def merge_family_target_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     return sorted(out, key=lambda x: (x["family"], x["scientific_name"], x["key"]))
 
 
-def generate_family_species_targets(order: str, family: str) -> list[SpeciesTarget]:
+def generate_family_species_targets(
+    order: str,
+    family: str,
+    *,
+    taxon_class: str | None = None,
+) -> list[SpeciesTarget]:
     all_rows: list[dict[str, Any]] = []
 
     for facet_field in FAMILY_TARGET_FACET_FIELDS:
         log(f"Family={family}: fetching {facet_field} target facet.")
-        facet_rows = fetch_family_facet_rows(order, family, facet_field)
+        facet_rows = fetch_family_facet_rows(
+            order,
+            family,
+            facet_field,
+            taxon_class=taxon_class,
+        )
         log(f"Family={family}: found {len(facet_rows):,} {facet_field} names.")
         all_rows.extend(facet_rows)
         time.sleep(REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES)
@@ -1203,6 +1235,139 @@ def generate_family_species_targets(order: str, family: str) -> list[SpeciesTarg
         raise ValueError(f"No valid ALA species targets found for family {family!r}.")
 
     return resolve_species_targets(rows, refresh_generated_targets=False)
+
+
+def is_valid_taxon_facet_label(label: str | None) -> bool:
+    text = normalise_text_cell(label)
+
+    if not text:
+        return False
+
+    if text.lower() in INVALID_TAXON_LABELS:
+        return False
+
+    if text.split()[0].lower() in {"not", "unknown", "unidentified"}:
+        return False
+
+    return True
+
+
+def build_class_order_facet_params(
+    taxon_class: str,
+    facet_offset: int = 0,
+) -> list[tuple[str, str | int]]:
+    params: list[tuple[str, str | int]] = [
+        ("q", "*:*"),
+        ("qualityProfile", QUALITY_PROFILE),
+        ("qc", QUALITY_CONTROL),
+        (START_PARAM_NAME, 0),
+        ("pageSize", 0),
+        ("facet", "true"),
+        ("facets", "order"),
+        ("flimit", YEAR_FACET_LIMIT),
+        ("foffset", facet_offset),
+    ]
+
+    if COUNTRY_FILTER_ENABLED:
+        params.append(("fq", COUNTRY_FILTER))
+
+    params.append(("fq", quote_fq("class", taxon_class)))
+    return params
+
+
+def build_class_order_family_facet_params(
+    taxon_class: str,
+    order: str,
+    facet_offset: int = 0,
+) -> list[tuple[str, str | int]]:
+    params: list[tuple[str, str | int]] = [
+        ("q", "*:*"),
+        ("qualityProfile", QUALITY_PROFILE),
+        ("qc", QUALITY_CONTROL),
+        (START_PARAM_NAME, 0),
+        ("pageSize", 0),
+        ("facet", "true"),
+        ("facets", "family"),
+        ("flimit", YEAR_FACET_LIMIT),
+        ("foffset", facet_offset),
+    ]
+
+    if COUNTRY_FILTER_ENABLED:
+        params.append(("fq", COUNTRY_FILTER))
+
+    params.extend(
+        [
+            ("fq", quote_fq("class", taxon_class)),
+            ("fq", quote_fq("order", order)),
+        ]
+    )
+    return params
+
+
+def fetch_named_facet_labels(
+    *,
+    facet_field: str,
+    params_builder: Callable[[int], list[tuple[str, str | int]]],
+    context: str,
+) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    facet_offset = 0
+
+    while True:
+        data = request_json_with_retries(
+            session=get_thread_session(),
+            params=params_builder(facet_offset),
+            context=f"{context}, offset={facet_offset}",
+        )
+        page_items: list[dict[str, Any]] = []
+
+        for facet in data.get("facetResults", []):
+            if facet.get("fieldName") == facet_field:
+                page_items.extend(facet.get("fieldResult", []))
+
+        for item in page_items:
+            label = normalise_text_cell(item.get("label"))
+            count = int(item.get("count", 0) or 0)
+            key = safe_key(label or "")
+
+            if count > 0 and key and key not in seen and is_valid_taxon_facet_label(label):
+                labels.append(label)
+                seen.add(key)
+
+        if len(page_items) < YEAR_FACET_LIMIT:
+            break
+
+        facet_offset += YEAR_FACET_LIMIT
+        log(
+            f"{context}: facet page limit reached for {facet_field}; "
+            f"requesting offset={facet_offset:,}"
+        )
+
+    return labels
+
+
+def discover_class_orders(taxon_class: str) -> list[str]:
+    return fetch_named_facet_labels(
+        facet_field="order",
+        params_builder=lambda offset: build_class_order_facet_params(
+            taxon_class,
+            offset,
+        ),
+        context=f"Class={taxon_class}, order_facet=order",
+    )
+
+
+def discover_order_families(taxon_class: str, order: str) -> list[str]:
+    return fetch_named_facet_labels(
+        facet_field="family",
+        params_builder=lambda offset: build_class_order_family_facet_params(
+            taxon_class,
+            order,
+            offset,
+        ),
+        context=f"Class={taxon_class}, order={order}, family_facet=family",
+    )
 
 
 def fetch_facet_partitions(
@@ -2264,9 +2429,11 @@ def family_run_config(
     dataset_class: str | None,
     family: str,
     generated_target_count: int,
+    taxon_class: str | None = None,
 ) -> dict[str, Any]:
     target_fq_filters = [
         *([COUNTRY_FILTER] if COUNTRY_FILTER_ENABLED else []),
+        *([quote_fq("class", taxon_class)] if taxon_class else []),
         quote_fq("order", order),
         quote_fq("family", family),
     ]
@@ -2276,6 +2443,7 @@ def family_run_config(
         "script_sha256": script_sha256(),
         "api_url": API_URL,
         "dataset_class": dataset_class or "misc",
+        "taxon_class": taxon_class,
         "order": order,
         "family": family,
         "country_filter_enabled": COUNTRY_FILTER_ENABLED,
@@ -2297,7 +2465,12 @@ def family_run_config(
             "facet_fields": list(FAMILY_TARGET_FACET_FIELDS),
             "facet_limit": YEAR_FACET_LIMIT,
             "query_params_by_facet": {
-                facet_field: build_family_target_params(order, family, facet_field)
+                facet_field: build_family_target_params(
+                    order,
+                    family,
+                    facet_field,
+                    taxon_class=taxon_class,
+                )
                 for facet_field in FAMILY_TARGET_FACET_FIELDS
             },
         },
@@ -2315,6 +2488,7 @@ def write_family_metadata(
     order: str,
     dataset_class: str | None,
     family: str,
+    taxon_class: str | None = None,
     run_started_utc: str,
     elapsed_seconds: float,
     species_targets: list[SpeciesTarget],
@@ -2333,6 +2507,7 @@ def write_family_metadata(
         order=order,
         dataset_class=dataset_class,
         family=family,
+        taxon_class=taxon_class,
         generated_target_count=len(species_targets),
     )
     metadata = {
@@ -2340,6 +2515,7 @@ def write_family_metadata(
         "run_finished_utc": utc_now(),
         "elapsed_seconds": round(elapsed_seconds, 3),
         "dataset_class": dataset_class or "misc",
+        "taxon_class": taxon_class,
         "order": order,
         "family": family,
         "country_filter": COUNTRY_FILTER if COUNTRY_FILTER_ENABLED else None,
@@ -2386,6 +2562,7 @@ def run_family_occurrence_workflow(
     write_csv: bool | None = None,
     order: str | None = None,
     dataset_class: str | None = None,
+    taxon_class: str | None = None,
 ) -> int:
     global WRITE_CSV
 
@@ -2393,6 +2570,7 @@ def run_family_occurrence_workflow(
         WRITE_CSV = write_csv
 
     effective_order = order or DEFAULT_GENERATED_ORDER
+    effective_dataset_class = dataset_class or (safe_key(taxon_class) if taxon_class else None)
     validate_privacy_settings()
     validate_run_settings()
 
@@ -2400,19 +2578,25 @@ def run_family_occurrence_workflow(
         family_started = time.perf_counter()
         family_started_utc = utc_now()
         configure_family_output_root(
-            family_output_root(effective_order, dataset_class, family)
+            family_output_root(effective_order, effective_dataset_class, family)
         )
         prepare_family_output_dir()
 
         log("Starting ALA family-level occurrence fetch.")
         log(f"Dataset output root: {OUTPUT_ROOT}")
-        log(f"Dataset class: {dataset_class or 'misc'}")
+        log(f"Dataset class: {effective_dataset_class or 'misc'}")
+        if taxon_class:
+            log(f"Taxon class: {taxon_class}")
         log(f"Order: {effective_order}")
         log(f"Family: {family}")
         log(f"CSV output enabled: {WRITE_CSV}")
         log(f"User-data fields enabled: {INCLUDE_USER_DATA_FIELDS}")
 
-        species_targets = generate_family_species_targets(effective_order, family)
+        species_targets = generate_family_species_targets(
+            effective_order,
+            family,
+            taxon_class=taxon_class,
+        )
         layout = worker_layout()
         log(f"Family={family}: generated targets={len(species_targets):,}")
         log(
@@ -2453,8 +2637,9 @@ def run_family_occurrence_workflow(
         elapsed_seconds = time.perf_counter() - family_started
         metadata_path = write_family_metadata(
             order=effective_order,
-            dataset_class=dataset_class,
+            dataset_class=effective_dataset_class,
             family=family,
+            taxon_class=taxon_class,
             run_started_utc=family_started_utc,
             elapsed_seconds=elapsed_seconds,
             species_targets=species_targets,
@@ -2472,6 +2657,39 @@ def run_family_occurrence_workflow(
     return 0
 
 
+def run_class_occurrence_workflow(
+    *,
+    taxon_class: str,
+    dataset_class: str | None = None,
+    write_csv: bool | None = None,
+    orders: list[str] | None = None,
+) -> int:
+    effective_dataset_class = dataset_class or safe_key(taxon_class)
+    active_orders = orders or discover_class_orders(taxon_class)
+
+    if not active_orders:
+        raise ValueError(f"No valid ALA order facets found for class {taxon_class!r}.")
+
+    for order in active_orders:
+        families = discover_order_families(taxon_class, order)
+
+        if not families:
+            log(
+                f"Class={taxon_class}, order={order}: no valid family facets found; skipping."
+            )
+            continue
+
+        run_family_occurrence_workflow(
+            families=families,
+            write_csv=write_csv,
+            order=order,
+            dataset_class=effective_dataset_class,
+            taxon_class=taxon_class,
+        )
+
+    return 0
+
+
 def run_alascraper(
     *,
     species_targets: list[SpeciesTarget | dict[str, Any]] | None = None,
@@ -2479,6 +2697,7 @@ def run_alascraper(
     refresh_generated_targets: bool = REFRESH_SPECIES_TARGETS_BEFORE_RUN,
     order: str | None = None,
     dataset_class: str | None = None,
+    taxon_class: str | None = None,
     families: list[str] | None = None,
 ) -> int:
     global WRITE_CSV
@@ -2489,6 +2708,15 @@ def run_alascraper(
             write_csv=write_csv,
             order=order,
             dataset_class=dataset_class,
+            taxon_class=taxon_class,
+        )
+
+    if taxon_class and species_targets is None:
+        return run_class_occurrence_workflow(
+            taxon_class=taxon_class,
+            dataset_class=dataset_class,
+            write_csv=write_csv,
+            orders=[order] if order else None,
         )
 
     if write_csv is not None:
@@ -2603,11 +2831,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--class",
+        dest="taxon_class",
+        default=None,
+        help=(
+            "ALA taxonomic class facet value to fetch, for example Aves. "
+            "When supplied without --family, the scraper discovers valid orders "
+            "and families for the class."
+        ),
+    )
+    parser.add_argument(
+        "--dataset-class",
         dest="dataset_class",
         default=None,
         help=(
             "Dataset class/group folder name under datasets/. "
-            "If omitted, results go under datasets/misc/."
+            "If omitted, class runs use the safe class name and other runs use misc."
         ),
     )
     parser.add_argument(
@@ -2647,6 +2885,7 @@ def main(argv: list[str] | None = None) -> int:
     return run_alascraper(
         order=args.order,
         dataset_class=args.dataset_class,
+        taxon_class=args.taxon_class,
         write_csv=args.write_csv,
         families=resolve_cli_families(
             butterflies=args.butterflies,
