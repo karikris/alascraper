@@ -1,10 +1,16 @@
 # alascraper
 
-Fetch Atlas of Living Australia occurrence records by species.
+Fetch Atlas of Living Australia occurrence records species by species.
 
-The default workflow writes Parquet outputs, uses DuckDB for merging, and keeps
-CSV disabled unless you explicitly enable it. Privacy-sensitive observer, source
-link, comment, and image fields are excluded by default.
+The workflow is built for Python 3.14, Polars, DuckDB, and Parquet. It fetches
+ALA occurrence records in parallel, writes resumable per-page shards, merges
+species outputs with DuckDB, and keeps CSV disabled unless explicitly enabled.
+Privacy-sensitive observer, source link, comment, and image fields are excluded
+by default.
+
+Primary data source: Atlas of Living Australia. Supplementary sources such as
+GBIF or taxon-specific authorities should be used for validation, not as the
+sole occurrence dataset.
 
 ## Install
 
@@ -14,6 +20,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+For tests:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Before long runs, edit the `USER_AGENT` and `TARGET_GENERATOR_USER_AGENT`
+constants in `constants.py` to use a real project contact address. Do not commit
+API keys or secrets.
+
 ## Run the Default Workflow
 
 ```bash
@@ -22,22 +38,48 @@ pip install -r requirements.txt
 
 By default, `alascraper.py` refreshes the generated ALA-backed species target
 list from `scripts/fetch_by_order.py`, then fetches occurrences for each
-species. `scripts/fetch_by_order.py` defaults to Australian ALA records in the order
-`Lepidoptera`.
+species. `scripts/fetch_by_order.py` defaults to Australian ALA records in the
+order `Lepidoptera`.
 
-To choose the order at runtime and write both Parquet and CSV outputs:
+Choose the dataset class and order at runtime:
 
 ```bash
-python3 alascraper.py --class insecta --order 'Lepidoptera' TRUE
+.venv/bin/python alascraper.py --class insecta --order Lepidoptera
 ```
 
-Use `FALSE` or omit the final argument to keep CSV output disabled. If
-`--class` is omitted, the run writes under `datasets/misc/<order>/`.
+If `--class` is omitted, the run writes under `datasets/misc/<order>/`.
+
+CSV output is off by default. Add the optional final boolean only when you need
+CSV next to Parquet:
+
+```bash
+.venv/bin/python alascraper.py --class insecta --order Lepidoptera TRUE
+```
+
+Use `FALSE` or omit the final argument to keep CSV disabled.
 
 For Poales:
 
 ```bash
-python3 alascraper.py --class monocot --order 'Poales' TRUE
+.venv/bin/python alascraper.py --class monocot --order Poales
+```
+
+## Run Family Outputs
+
+Use `--family` to fetch one or more ALA family facets into family-level Parquet
+outputs. Values may be repeated or comma-separated.
+
+```bash
+.venv/bin/python alascraper.py --class insecta --order Lepidoptera --family Nymphalidae
+.venv/bin/python alascraper.py --class insecta --order Lepidoptera --family Nymphalidae,Lycaenidae
+```
+
+Use `--butterflies` for the six Australian butterfly families under
+Lepidoptera: Hesperiidae, Papilionidae, Pieridae, Nymphalidae, Riodinidae, and
+Lycaenidae.
+
+```bash
+.venv/bin/python alascraper.py --class insecta --order Lepidoptera --butterflies
 ```
 
 ## Generate Targets for Another Order
@@ -106,7 +148,12 @@ raise SystemExit(
 Edit these in `constants.py` for normal runs:
 
 ```python
-WORKERS = 16
+DEFAULT_GENERATED_ORDER = "Lepidoptera"
+REFRESH_SPECIES_TARGETS_BEFORE_RUN = True
+COUNTRY_FILTER_ENABLED = True
+COUNTRY_FILTER = 'country:"Australia"'
+PAGE_SIZE = 500
+WORKERS = 12
 TAXON_LANE_LAYOUTS = {
     16: (8, 2),
     12: (6, 2),
@@ -116,18 +163,23 @@ TAXON_LANE_LAYOUTS = {
 }
 MAX_RECORDS_PER_SPECIES = None
 WRITE_CSV = False
+WRITE_DUCKDB_DATABASE = True
+WRITE_RAW_PAGE_JSON = False
+INCLUDE_USER_DATA_FIELDS = False
 FRESH_RUN = False
 DATASETS_ROOT = Path("datasets")
 ```
 
-Set `MAX_RECORDS_PER_SPECIES` to a small number for test runs. Leave it as
-`None` for full species exports.
+`WORKERS = 12` is the default for the Ultra 7 265K target machine. The matching
+layout runs six taxa at a time with two page workers per taxon. Set
+`MAX_RECORDS_PER_SPECIES` to a small number for smoke tests; leave it as `None`
+for full species exports.
 
 `TAXON_LANE_LAYOUTS` maps total workers to `(concurrent_taxa, page_workers_per_taxon)`.
 
 ## Outputs
 
-Default dataset output directory:
+Default order-level dataset output directory:
 
 ```text
 datasets/<class_or_misc>/<order>/
@@ -146,6 +198,15 @@ datasets/<class_or_misc>/<order>/
             └── page_000000.parquet
 ```
 
+Family-level runs write compact family outputs:
+
+```text
+datasets/<class_or_misc>/<order>/<family>/
+├── <family>.parquet
+├── metadata.json
+└── run_log.txt
+```
+
 ## Privacy Defaults
 
 `INCLUDE_USER_DATA_FIELDS = False` omits observer/user and source-linked fields.
@@ -159,6 +220,14 @@ profile/source links, comments, or media metadata.
 Validate occurrence datasets against ALA, GBIF, and taxon-specific authority
 lists where needed. Use supplementary sources mainly to detect range extensions,
 recent spread, and under-sampled localities.
+
+## Test
+
+Run the unit tests before committing changes:
+
+```bash
+.venv/bin/python -m pytest -q
+```
 
 ## Ownership
 
