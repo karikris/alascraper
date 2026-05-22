@@ -27,6 +27,8 @@ Design:
   - Multiple taxa can be fetched concurrently, each with bounded page workers.
   - Each species gets its own Parquet folder.
   - DuckDB merges all species Parquet files into one final all-species Parquet.
+  - Family mode writes one final Parquet plus metadata and run log per family,
+    using hidden scratch shards that are removed after a successful merge.
   - CSV output is optional and disabled by default.
 """
 
@@ -99,6 +101,16 @@ from constants import (
     YEAR_FACET_LIMIT,
 )
 
+BUTTERFLY_FAMILIES = (
+    "Hesperiidae",
+    "Papilionidae",
+    "Pieridae",
+    "Nymphalidae",
+    "Riodinidae",
+    "Lycaenidae",
+)
+
+FAMILY_TARGET_FACET_FIELDS = ("species", "subspecies")
 
 # =============================================================================
 # USER TARGETS
@@ -121,6 +133,7 @@ class SpeciesTarget:
     common_name: str | None = None
     taxon_lsid: str | None = None
     source_order: str | None = None
+    source_family: str | None = None
     facet_fq_filters: tuple[str, ...] = ()
     target_match_suspect: bool = False
 
@@ -213,6 +226,14 @@ class SpeciesResult:
     fetch_error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class MergeStats:
+    output_path: Path
+    input_rows: int
+    output_rows: int
+    dropped_rows: int
+
+
 _SESSION_LOCAL = threading.local()
 _SESSION_REGISTRY_LOCK = threading.Lock()
 _SESSION_REGISTRY: list[requests.Session] = []
@@ -241,6 +262,27 @@ def dataset_output_root(order: str | None, dataset_class: str | None) -> Path:
     return DATASETS_ROOT / class_key / order_key
 
 
+def family_output_root(
+    order: str | None,
+    dataset_class: str | None,
+    family: str,
+) -> Path:
+    family_key = safe_key(family)
+
+    if not family_key:
+        raise ValueError("Family must not be empty.")
+
+    return dataset_output_root(order, dataset_class) / family_key
+
+
+def family_parquet_path(
+    order: str | None,
+    dataset_class: str | None,
+    family: str,
+) -> Path:
+    return family_output_root(order, dataset_class, family) / f"{safe_key(family)}.parquet"
+
+
 def generated_species_targets_path(order: str | None = None) -> Path:
     order_key = safe_key(order or DEFAULT_GENERATED_ORDER)
 
@@ -265,6 +307,19 @@ def configure_output_root(output_root: Path) -> None:
     DUCKDB_PATH = OUTPUT_ROOT / "ala_species_records.duckdb"
     RUN_LOG_PATH = OUTPUT_ROOT / "run_log.txt"
     MANIFEST_PATH = OUTPUT_ROOT / "species_manifest.csv"
+
+
+def configure_family_output_root(output_root: Path) -> None:
+    configure_output_root(output_root)
+    global SPECIES_ROOT
+    global FINAL_ALL_SPECIES_PARQUET
+    global FINAL_ALL_SPECIES_CSV
+    global DUCKDB_PATH
+    family_key = safe_key(output_root.name)
+    SPECIES_ROOT = OUTPUT_ROOT / ".scratch" / "species"
+    FINAL_ALL_SPECIES_PARQUET = OUTPUT_ROOT / f"{family_key}.parquet"
+    FINAL_ALL_SPECIES_CSV = OUTPUT_ROOT / f"{family_key}.csv"
+    DUCKDB_PATH = OUTPUT_ROOT / ".scratch" / f"{family_key}.duckdb"
 
 
 def is_probable_scientific_name(name: str) -> bool:
@@ -318,7 +373,8 @@ def coerce_species_target(value: SpeciesTarget | dict[str, Any]) -> SpeciesTarge
         scientific_name=scientific_name,
         common_name=value.get("common_name"),
         taxon_lsid=value.get("taxon_lsid"),
-        source_order=normalise_text_cell(value.get("order")),
+        source_order=normalise_text_cell(value.get("order")) or None,
+        source_family=normalise_text_cell(value.get("family")) or None,
         facet_fq_filters=facet_fq_filters,
         target_match_suspect=bool(value.get("target_match_suspect", False)),
     )
@@ -692,6 +748,9 @@ def build_fq_filters(target: SpeciesTarget) -> list[str]:
     if target.source_order:
         filters.append(quote_fq("order", target.source_order))
 
+    if target.source_family:
+        filters.append(quote_fq("family", target.source_family))
+
     if target.facet_fq_filters:
         filters.append(joined_facet_filter(target.facet_fq_filters))
         return filters
@@ -783,6 +842,7 @@ def species_run_config(target: SpeciesTarget) -> dict[str, Any]:
             "common_name": target.common_name,
             "taxon_lsid": target.taxon_lsid,
             "source_order": target.source_order,
+            "source_family": target.source_family,
             "facet_fq_filters": list(target.facet_fq_filters),
         },
     }
@@ -999,6 +1059,150 @@ def fetch_total_records(
         total = min(total, MAX_RECORDS_PER_SPECIES)
 
     return total, target_match_suspect
+
+
+def build_family_target_params(
+    order: str,
+    family: str,
+    facet_field: str,
+    facet_offset: int = 0,
+) -> list[tuple[str, str | int]]:
+    params: list[tuple[str, str | int]] = [
+        ("q", "*:*"),
+        ("qualityProfile", QUALITY_PROFILE),
+        ("qc", QUALITY_CONTROL),
+        (START_PARAM_NAME, 0),
+        ("pageSize", 0),
+        ("facet", "true"),
+        ("facets", facet_field),
+        ("flimit", YEAR_FACET_LIMIT),
+        ("foffset", facet_offset),
+    ]
+
+    if COUNTRY_FILTER_ENABLED:
+        params.append(("fq", COUNTRY_FILTER))
+
+    params.extend(
+        [
+            ("fq", quote_fq("order", order)),
+            ("fq", quote_fq("family", family)),
+        ]
+    )
+
+    return params
+
+
+def fetch_family_facet_rows(
+    order: str,
+    family: str,
+    facet_field: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    facet_offset = 0
+
+    while True:
+        params = build_family_target_params(order, family, facet_field, facet_offset)
+        data = request_json_with_retries(
+            session=get_thread_session(),
+            params=params,
+            context=f"family={family}, target_facet={facet_field}, offset={facet_offset}",
+        )
+        page_items: list[dict[str, Any]] = []
+
+        for facet in data.get("facetResults", []):
+            if facet.get("fieldName") == facet_field:
+                page_items.extend(facet.get("fieldResult", []))
+
+        for item in page_items:
+            scientific_name = normalise_text_cell(item.get("label"))
+            count = int(item.get("count", 0) or 0)
+            fq = normalise_text_cell(item.get("fq"))
+
+            if (
+                scientific_name
+                and count > 0
+                and fq
+                and is_probable_scientific_name(scientific_name)
+            ):
+                rows.append(
+                    {
+                        "species_key": safe_key(scientific_name),
+                        "scientific_name": scientific_name,
+                        "order": order,
+                        "family": family,
+                        "facet_field": facet_field,
+                        "ala_occurrence_count": count,
+                        "ala_facet_fq": fq,
+                    }
+                )
+
+        if len(page_items) < YEAR_FACET_LIMIT:
+            break
+
+        facet_offset += YEAR_FACET_LIMIT
+        log(
+            f"Family={family}: facet page limit reached for {facet_field}; "
+            f"requesting offset={facet_offset:,}"
+        )
+
+    return rows
+
+
+def merge_family_target_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        name = row["scientific_name"]
+
+        if name not in merged:
+            merged[name] = {
+                "species_key": safe_key(name),
+                "scientific_name": name,
+                "order": row["order"],
+                "family": row["family"],
+                "facet_fields": set(),
+                "ala_occurrence_count": 0,
+                "ala_facet_fq": set(),
+            }
+
+        merged[name]["facet_fields"].add(row["facet_field"])
+        merged[name]["ala_occurrence_count"] += row["ala_occurrence_count"]
+        merged[name]["ala_facet_fq"].add(row["ala_facet_fq"])
+
+    out: list[dict[str, Any]] = []
+
+    for item in merged.values():
+        out.append(
+            {
+                "key": item["species_key"],
+                "scientific_name": item["scientific_name"],
+                "order": item["order"],
+                "family": item["family"],
+                "facet_fields": " | ".join(sorted(item["facet_fields"])),
+                "ala_occurrence_count": item["ala_occurrence_count"],
+                "ala_facet_fq": " | ".join(sorted(item["ala_facet_fq"])),
+            }
+        )
+
+    return sorted(out, key=lambda x: (x["family"], x["scientific_name"], x["key"]))
+
+
+def generate_family_species_targets(order: str, family: str) -> list[SpeciesTarget]:
+    all_rows: list[dict[str, Any]] = []
+
+    for facet_field in FAMILY_TARGET_FACET_FIELDS:
+        log(f"Family={family}: fetching {facet_field} target facet.")
+        facet_rows = fetch_family_facet_rows(order, family, facet_field)
+        log(f"Family={family}: found {len(facet_rows):,} {facet_field} names.")
+        all_rows.extend(facet_rows)
+        time.sleep(REQUEST_SLEEP_SECONDS_BETWEEN_SPECIES)
+
+    rows = merge_family_target_rows(all_rows)
+
+    if not rows:
+        raise ValueError(f"No valid ALA species targets found for family {family!r}.")
+
+    return resolve_species_targets(rows, refresh_generated_targets=False)
 
 
 def fetch_facet_partitions(
@@ -1239,9 +1443,6 @@ def make_query_partition_plan(target: SpeciesTarget, total_records: int) -> Quer
         )
         log(f"Species={target.key}: warning: {detail}.")
 
-        if partition_total < total_records:
-            partitions = [*partitions, first_window_partition(total_records)]
-
         return QueryPartitionPlan(
             partitions=partitions,
             coverage_status="partition_total_mismatch",
@@ -1481,6 +1682,48 @@ def field_select_list(table_alias: str | None = None) -> str:
     return ", ".join(f"{prefix}{sql_ident(field)}" for field in FIELDS)
 
 
+def source_field(table_alias: str, field: str) -> str:
+    return f"{sql_ident(table_alias)}.{sql_ident(field)}"
+
+
+def null_uuid_fingerprint_sql(table_alias: str) -> str:
+    taxon_name = "COALESCE(" + ", ".join(
+        f"CAST({source_field(table_alias, field)} AS VARCHAR)"
+        for field in (
+            "scientificName",
+            "raw_scientificName",
+            "species",
+            "query_scientific_name",
+        )
+    ) + ", '')"
+    basis_of_record = "COALESCE(" + ", ".join(
+        f"CAST({source_field(table_alias, field)} AS VARCHAR)"
+        for field in ("basisOfRecord", "raw_basisOfRecord")
+    ) + ", '')"
+    parts = [
+        taxon_name,
+        f"COALESCE(CAST({source_field(table_alias, 'decimalLatitude')} AS VARCHAR), '')",
+        f"COALESCE(CAST({source_field(table_alias, 'decimalLongitude')} AS VARCHAR), '')",
+        f"COALESCE(CAST({source_field(table_alias, 'eventDate')} AS VARCHAR), '')",
+        f"COALESCE(CAST({source_field(table_alias, 'dataResourceUid')} AS VARCHAR), '')",
+        f"COALESCE(CAST({source_field(table_alias, 'dataResourceName')} AS VARCHAR), '')",
+        f"COALESCE(CAST({source_field(table_alias, 'recordNumber')} AS VARCHAR), '')",
+        basis_of_record,
+    ]
+    separator = " || '|' || "
+    return separator.join(parts)
+
+
+def dedupe_key_sql(table_alias: str) -> str:
+    uuid_field = source_field(table_alias, "uuid")
+    uuid_key = f"'uuid:' || CAST({uuid_field} AS VARCHAR)"
+    fingerprint_key = f"'fp:' || {null_uuid_fingerprint_sql(table_alias)}"
+    return (
+        f"CASE WHEN {uuid_field} IS NOT NULL AND CAST({uuid_field} AS VARCHAR) != '' "
+        f"THEN {uuid_key} ELSE {fingerprint_key} END"
+    )
+
+
 def deduped_select_sql(source_sql: str) -> str:
     if not DEDUPE_BY_UUID:
         return f"SELECT {field_select_list()} FROM {source_sql}"
@@ -1491,7 +1734,7 @@ def deduped_select_sql(source_sql: str) -> str:
             SELECT
                 {field_select_list("source")},
                 ROW_NUMBER() OVER (
-                    PARTITION BY {sql_ident("source")}.{sql_ident("uuid")}
+                    PARTITION BY {dedupe_key_sql("source")}
                     ORDER BY
                         {sql_ident("source")}.{sql_ident("eventDate")} NULLS LAST,
                         {sql_ident("source")}.{sql_ident("query_species_key")},
@@ -1499,8 +1742,7 @@ def deduped_select_sql(source_sql: str) -> str:
                 ) AS {sql_ident("_uuid_rank")}
             FROM {source_sql} AS {sql_ident("source")}
         ) AS {sql_ident("deduped")}
-        WHERE {sql_ident("deduped")}.{sql_ident("uuid")} IS NULL
-           OR {sql_ident("deduped")}.{sql_ident("_uuid_rank")} = 1
+        WHERE {sql_ident("deduped")}.{sql_ident("_uuid_rank")} = 1
     """
 
 
@@ -1526,7 +1768,7 @@ def merge_species_shards(target: SpeciesTarget) -> Path:
         if DEDUPE_BY_UUID:
             dropped_rows = input_rows - output_rows
             log(
-                f"Species={target.key}: UUID dedupe kept {output_rows:,}/{input_rows:,} "
+                f"Species={target.key}: dedupe kept {output_rows:,}/{input_rows:,} "
                 f"rows; dropped={dropped_rows:,}"
             )
 
@@ -1592,7 +1834,7 @@ def merge_all_species(species_results: list[SpeciesResult]) -> None:
         if DEDUPE_BY_UUID:
             dropped_rows = input_rows - output_rows
             log(
-                f"All-species UUID dedupe kept {output_rows:,}/{input_rows:,} "
+                f"All-species dedupe kept {output_rows:,}/{input_rows:,} "
                 f"rows; dropped={dropped_rows:,}"
             )
 
@@ -1636,6 +1878,64 @@ def merge_all_species(species_results: list[SpeciesResult]) -> None:
 
     finally:
         con.close()
+
+
+def merge_species_results_to_parquet(
+    species_results: list[SpeciesResult],
+    output_path: Path,
+) -> MergeStats:
+    species_files = [
+        str(result.species_parquet_path).replace("\\", "/")
+        for result in species_results
+        if result.species_parquet_path.exists()
+    ]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not species_files:
+        pl.DataFrame([], schema=SCHEMA).write_parquet(output_path)
+        return MergeStats(
+            output_path=output_path,
+            input_rows=0,
+            output_rows=0,
+            dropped_rows=0,
+        )
+
+    con = duckdb.connect(":memory:")
+
+    try:
+        threads = min(WORKERS, os.cpu_count() or WORKERS)
+        con.execute(f"PRAGMA threads={threads}")
+        file_list_sql = "[" + ",".join("'" + f.replace("'", "''") + "'" for f in species_files) + "]"
+        source_sql = f"read_parquet({file_list_sql})"
+        select_sql = deduped_select_sql(source_sql)
+        input_rows = con.execute(f"SELECT COUNT(*) FROM {source_sql}").fetchone()[0]
+        output_rows = con.execute(f"SELECT COUNT(*) FROM ({select_sql})").fetchone()[0]
+
+        output_sql_path = str(output_path).replace("\\", "/")
+        output_path.unlink(missing_ok=True)
+        con.execute(
+            f"""
+            COPY (
+                {select_sql}
+            )
+            TO {sql_string(output_sql_path)}
+            (
+                FORMAT parquet,
+                COMPRESSION '{PARQUET_COMPRESSION}',
+                ROW_GROUP_SIZE {PARQUET_ROW_GROUP_SIZE}
+            )
+            """
+        )
+    finally:
+        con.close()
+
+    return MergeStats(
+        output_path=output_path,
+        input_rows=input_rows,
+        output_rows=output_rows,
+        dropped_rows=input_rows - output_rows,
+    )
 
 
 # =============================================================================
@@ -1930,6 +2230,248 @@ def run_parallel_fetch_for_targets(
     return [ordered_results[index] for index in range(len(targets))]
 
 
+def family_scratch_root() -> Path:
+    return OUTPUT_ROOT / ".scratch"
+
+
+def prepare_family_output_dir() -> None:
+    if FRESH_RUN and OUTPUT_ROOT.exists():
+        shutil.rmtree(OUTPUT_ROOT)
+
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    RUN_LOG_PATH.write_text("", encoding="utf-8")
+
+
+def family_coverage_status(species_results: list[SpeciesResult]) -> str:
+    if any(result.fetch_status != "complete" for result in species_results):
+        return "incomplete_failed_species"
+
+    if any(result.page_validation_issue_count > 0 for result in species_results):
+        return "incomplete_failed_or_partial_pages"
+
+    if any(
+        result.partition_coverage_status != "complete"
+        for result in species_results
+    ):
+        return "best_effort_partition_limited"
+
+    return "complete"
+
+
+def family_run_config(
+    *,
+    order: str,
+    dataset_class: str | None,
+    family: str,
+    generated_target_count: int,
+) -> dict[str, Any]:
+    target_fq_filters = [
+        *([COUNTRY_FILTER] if COUNTRY_FILTER_ENABLED else []),
+        quote_fq("order", order),
+        quote_fq("family", family),
+    ]
+
+    return {
+        "run_config_version": RUN_CONFIG_VERSION,
+        "script_sha256": script_sha256(),
+        "api_url": API_URL,
+        "dataset_class": dataset_class or "misc",
+        "order": order,
+        "family": family,
+        "country_filter_enabled": COUNTRY_FILTER_ENABLED,
+        "country_filter": COUNTRY_FILTER,
+        "quality_profile": QUALITY_PROFILE,
+        "quality_control": QUALITY_CONTROL,
+        "start_param_name": START_PARAM_NAME,
+        "ala_sort_field": ALA_SORT_FIELD,
+        "ala_sort_direction": ALA_SORT_DIRECTION,
+        "dedupe_by_uuid_or_fingerprint": DEDUPE_BY_UUID,
+        "search_api_max_window": SEARCH_API_MAX_WINDOW,
+        "year_facet_limit": YEAR_FACET_LIMIT,
+        "page_size": PAGE_SIZE,
+        "max_records_per_species": MAX_RECORDS_PER_SPECIES,
+        "workers": WORKERS,
+        "target_generation": {
+            "query": "*:*",
+            "fq_filters": target_fq_filters,
+            "facet_fields": list(FAMILY_TARGET_FACET_FIELDS),
+            "facet_limit": YEAR_FACET_LIMIT,
+            "query_params_by_facet": {
+                facet_field: build_family_target_params(order, family, facet_field)
+                for facet_field in FAMILY_TARGET_FACET_FIELDS
+            },
+        },
+        "generated_target_count": generated_target_count,
+        "include_user_data_fields": INCLUDE_USER_DATA_FIELDS,
+        "write_raw_page_json": WRITE_RAW_PAGE_JSON,
+        "write_csv": WRITE_CSV,
+        "fields": FIELDS,
+        "schema": schema_signature(),
+    }
+
+
+def write_family_metadata(
+    *,
+    order: str,
+    dataset_class: str | None,
+    family: str,
+    run_started_utc: str,
+    elapsed_seconds: float,
+    species_targets: list[SpeciesTarget],
+    species_results: list[SpeciesResult],
+    merge_stats: MergeStats,
+) -> Path:
+    failed_species = [
+        result for result in species_results if result.fetch_status != "complete"
+    ]
+    failed_pages = sum(
+        result.page_validation_issue_count for result in species_results
+    )
+    records_reported = sum(result.reported_total_records for result in species_results)
+    rows_fetched = sum(result.rows_written for result in species_results)
+    config = family_run_config(
+        order=order,
+        dataset_class=dataset_class,
+        family=family,
+        generated_target_count=len(species_targets),
+    )
+    metadata = {
+        "run_started_utc": run_started_utc,
+        "run_finished_utc": utc_now(),
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "dataset_class": dataset_class or "misc",
+        "order": order,
+        "family": family,
+        "country_filter": COUNTRY_FILTER if COUNTRY_FILTER_ENABLED else None,
+        "quality_profile": QUALITY_PROFILE,
+        "quality_control": QUALITY_CONTROL,
+        "api_url": API_URL,
+        "target_generation": config["target_generation"],
+        "generated_target_count": len(species_targets),
+        "records_reported": records_reported,
+        "rows_fetched": rows_fetched,
+        "rows_kept_after_dedupe": merge_stats.output_rows,
+        "rows_dropped": merge_stats.dropped_rows,
+        "failed_species_count": len(failed_species),
+        "failed_page_count": failed_pages,
+        "coverage_status": family_coverage_status(species_results),
+        "partition_coverage_statuses": sorted(
+            set(result.partition_coverage_status for result in species_results)
+        ),
+        "output_parquet_filename": merge_stats.output_path.name,
+        "schema_fields": FIELDS,
+        "schema": schema_signature(),
+        "privacy_settings": {
+            "include_user_data_fields": INCLUDE_USER_DATA_FIELDS,
+            "write_raw_page_json": WRITE_RAW_PAGE_JSON,
+            "raw_images_stored": False,
+            "usernames_profile_links_comments_stored": INCLUDE_USER_DATA_FIELDS,
+        },
+        "script_sha256": config["script_sha256"],
+        "config_fingerprint": config_fingerprint(config),
+        "config": config,
+    }
+    metadata_path = OUTPUT_ROOT / "metadata.json"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return metadata_path
+
+
+def run_family_occurrence_workflow(
+    *,
+    families: list[str],
+    write_csv: bool | None = None,
+    order: str | None = None,
+    dataset_class: str | None = None,
+) -> int:
+    global WRITE_CSV
+
+    if write_csv is not None:
+        WRITE_CSV = write_csv
+
+    effective_order = order or DEFAULT_GENERATED_ORDER
+    validate_privacy_settings()
+    validate_run_settings()
+
+    for family in families:
+        family_started = time.perf_counter()
+        family_started_utc = utc_now()
+        configure_family_output_root(
+            family_output_root(effective_order, dataset_class, family)
+        )
+        prepare_family_output_dir()
+
+        log("Starting ALA family-level occurrence fetch.")
+        log(f"Dataset output root: {OUTPUT_ROOT}")
+        log(f"Dataset class: {dataset_class or 'misc'}")
+        log(f"Order: {effective_order}")
+        log(f"Family: {family}")
+        log(f"CSV output enabled: {WRITE_CSV}")
+        log(f"User-data fields enabled: {INCLUDE_USER_DATA_FIELDS}")
+
+        species_targets = generate_family_species_targets(effective_order, family)
+        layout = worker_layout()
+        log(f"Family={family}: generated targets={len(species_targets):,}")
+        log(
+            f"Workers: {WORKERS}; taxon lanes: {layout.taxon_lanes}; "
+            f"page workers per taxon: {layout.page_workers_per_taxon}"
+        )
+
+        species_results = run_parallel_fetch_for_targets(species_targets, layout)
+        merge_stats = merge_species_results_to_parquet(
+            species_results,
+            FINAL_ALL_SPECIES_PARQUET,
+        )
+        log(
+            f"Family={family}: wrote Parquet={merge_stats.output_path}; "
+            f"kept={merge_stats.output_rows:,}/{merge_stats.input_rows:,}; "
+            f"dropped={merge_stats.dropped_rows:,}"
+        )
+
+        if WRITE_CSV:
+            parquet_sql_path = str(FINAL_ALL_SPECIES_PARQUET).replace("\\", "/")
+            csv_sql_path = str(FINAL_ALL_SPECIES_CSV).replace("\\", "/")
+            con = duckdb.connect(":memory:")
+            try:
+                con.execute(
+                    f"""
+                    COPY (
+                        SELECT *
+                        FROM read_parquet({sql_string(parquet_sql_path)})
+                    )
+                    TO {sql_string(csv_sql_path)}
+                    (HEADER, DELIMITER ',')
+                    """
+                )
+            finally:
+                con.close()
+            log(f"Family={family}: wrote optional CSV={FINAL_ALL_SPECIES_CSV}")
+
+        elapsed_seconds = time.perf_counter() - family_started
+        metadata_path = write_family_metadata(
+            order=effective_order,
+            dataset_class=dataset_class,
+            family=family,
+            run_started_utc=family_started_utc,
+            elapsed_seconds=elapsed_seconds,
+            species_targets=species_targets,
+            species_results=species_results,
+            merge_stats=merge_stats,
+        )
+        log(f"Family={family}: wrote metadata={metadata_path}")
+
+        shutil.rmtree(family_scratch_root(), ignore_errors=True)
+        log(
+            f"Family={family}: complete in {format_duration(elapsed_seconds)}; "
+            f"coverage_status={family_coverage_status(species_results)}"
+        )
+
+    return 0
+
+
 def run_alascraper(
     *,
     species_targets: list[SpeciesTarget | dict[str, Any]] | None = None,
@@ -1937,8 +2479,17 @@ def run_alascraper(
     refresh_generated_targets: bool = REFRESH_SPECIES_TARGETS_BEFORE_RUN,
     order: str | None = None,
     dataset_class: str | None = None,
+    families: list[str] | None = None,
 ) -> int:
     global WRITE_CSV
+
+    if families:
+        return run_family_occurrence_workflow(
+            families=families,
+            write_csv=write_csv,
+            order=order,
+            dataset_class=dataset_class,
+        )
 
     if write_csv is not None:
         WRITE_CSV = write_csv
@@ -2006,6 +2557,38 @@ def parse_bool(value: str) -> bool:
     )
 
 
+def parse_family_values(values: list[str] | None) -> list[str]:
+    families: list[str] = []
+
+    for value in values or []:
+        for family in value.split(","):
+            normalised = family.strip()
+            if normalised:
+                families.append(normalised)
+
+    return families
+
+
+def resolve_cli_families(
+    *,
+    butterflies: bool,
+    family_values: list[str] | None,
+) -> list[str]:
+    families = [*BUTTERFLY_FAMILIES] if butterflies else []
+    families.extend(parse_family_values(family_values))
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for family in families:
+        key = safe_key(family)
+        if key and key not in seen:
+            out.append(family)
+            seen.add(key)
+
+    return out
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Fetch Atlas of Living Australia occurrence records species by species."
@@ -2028,6 +2611,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--family",
+        action="append",
+        default=None,
+        help=(
+            "ALA family facet value to fetch into family-level Parquet output. "
+            "May be repeated or comma-separated, for example "
+            "--family Nymphalidae --family Lycaenidae or --family Nymphalidae,Lycaenidae."
+        ),
+    )
+    parser.add_argument(
+        "--butterflies",
+        action="store_true",
+        help=(
+            "Shortcut for the six Australian butterfly families under Lepidoptera: "
+            "Hesperiidae, Papilionidae, Pieridae, Nymphalidae, Riodinidae, Lycaenidae."
+        ),
+    )
+    parser.add_argument(
         "write_csv",
         nargs="?",
         type=parse_bool,
@@ -2047,6 +2648,10 @@ def main(argv: list[str] | None = None) -> int:
         order=args.order,
         dataset_class=args.dataset_class,
         write_csv=args.write_csv,
+        families=resolve_cli_families(
+            butterflies=args.butterflies,
+            family_values=args.family,
+        ),
     )
 
 

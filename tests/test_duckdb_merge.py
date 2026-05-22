@@ -28,6 +28,36 @@ def test_merge_species_shards_dedupes_duplicate_uuid(
     assert df.filter(pl.col("uuid") == "dup")["eventDate"].item() == 1_000
 
 
+def test_merge_species_shards_dedupes_null_uuid_fingerprint(
+    monkeypatch,
+    isolated_outputs,
+    target: a.SpeciesTarget,
+    record_row,
+    parquet_shard_writer,
+) -> None:
+    monkeypatch.setattr(a, "DEDUPE_BY_UUID", True)
+    duplicate_a = record_row(target, uuid=None, event_date=1_000)
+    duplicate_b = record_row(target, uuid=None, event_date=2_000)
+    unique = record_row(target, uuid=None, event_date=3_000, scientific_name="Other species")
+
+    for row in (duplicate_a, duplicate_b, unique):
+        row["decimalLatitude"] = -37.1
+        row["decimalLongitude"] = 145.2
+        row["dataResourceUid"] = "dr1"
+        row["recordNumber"] = "rn1"
+        row["basisOfRecord"] = "HUMAN_OBSERVATION"
+
+    duplicate_b["eventDate"] = duplicate_a["eventDate"]
+
+    parquet_shard_writer(target, 0, [duplicate_a, duplicate_b, unique])
+
+    output = a.merge_species_shards(target)
+    df = pl.read_parquet(output)
+
+    assert df.height == 2
+    assert set(df["scientificName"].to_list()) == {"Testus species", "Other species"}
+
+
 def test_merge_all_species_dedupes_across_species(
     monkeypatch,
     isolated_outputs,

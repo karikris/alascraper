@@ -106,8 +106,9 @@ def build_params(
     order: str,
     facet_field: str,
     facet_offset: int = 0,
+    family: str | None = None,
 ) -> list[tuple[str, str | int]]:
-    return [
+    params: list[tuple[str, str | int]] = [
         ("q", "*:*"),
         ("fq", COUNTRY_FILTER),
         ("fq", f'order:"{order}"'),
@@ -120,11 +121,17 @@ def build_params(
         ("foffset", facet_offset),
     ]
 
+    if family:
+        params.append(("fq", f'family:"{family}"'))
+
+    return params
+
 
 def fetch_order_taxa(
     session: requests.Session,
     order: str,
     facet_field: str,
+    family: str | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     facet_offset = 0
@@ -132,7 +139,7 @@ def fetch_order_taxa(
     while True:
         response = session.get(
             API_URL,
-            params=build_params(order, facet_field, facet_offset),
+            params=build_params(order, facet_field, facet_offset, family=family),
             timeout=TIMEOUT_SECONDS,
         )
         response.raise_for_status()
@@ -156,6 +163,7 @@ def fetch_order_taxa(
                         "species_key": safe_key(scientific_name),
                         "scientific_name": scientific_name,
                         "order": order,
+                        "family": family,
                         "facet_field": facet_field,
                         "ala_occurrence_count": count,
                         "ala_facet_fq": fq,
@@ -185,12 +193,15 @@ def merge_taxa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "species_key": safe_key(name),
                 "scientific_name": name,
                 "orders": set(),
+                "families": set(),
                 "facet_fields": set(),
                 "ala_occurrence_count": 0,
                 "ala_facet_fq": set(),
             }
 
         merged[name]["orders"].add(row["order"])
+        if row.get("family"):
+            merged[name]["families"].add(row["family"])
         merged[name]["facet_fields"].add(row["facet_field"])
         merged[name]["ala_occurrence_count"] += row["ala_occurrence_count"]
 
@@ -205,6 +216,7 @@ def merge_taxa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "species_key": item["species_key"],
                 "scientific_name": item["scientific_name"],
                 "order": " | ".join(sorted(item["orders"])),
+                "family": " | ".join(sorted(item["families"])),
                 "facet_fields": " | ".join(sorted(item["facet_fields"])),
                 "ala_occurrence_count": item["ala_occurrence_count"],
                 "ala_facet_fq": " | ".join(sorted(item["ala_facet_fq"])),
@@ -227,6 +239,7 @@ def write_csv(rows: list[dict[str, Any]], path: Path) -> None:
                 "species_key",
                 "scientific_name",
                 "order",
+                "family",
                 "facet_fields",
                 "ala_occurrence_count",
                 "ala_facet_fq",
@@ -248,8 +261,10 @@ def generate_species_targets(
     order: str = ORDER,
     *,
     output_dir: Path | str = OUTPUT_DIR,
+    family: str | None = None,
 ) -> list[dict[str, Any]]:
     order = order.strip()
+    family = family.strip() if family else None
     output_dir = Path(output_dir)
 
     if not order:
@@ -262,10 +277,11 @@ def generate_species_targets(
 
         for facet_field in FACET_FIELDS:
             print(
-                f"Fetching {facet_field} facet for order={order}",
+                f"Fetching {facet_field} facet for order={order}"
+                + (f", family={family}" if family else ""),
                 flush=True,
             )
-            order_rows = fetch_order_taxa(session, order, facet_field)
+            order_rows = fetch_order_taxa(session, order, facet_field, family=family)
             print(
                 f"  found {len(order_rows):,} {facet_field} names",
                 flush=True,
@@ -305,12 +321,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=OUTPUT_DIR,
         help=f"Directory for generated target files. Default: {OUTPUT_DIR}",
     )
+    parser.add_argument(
+        "--family",
+        default=None,
+        help="Optional ALA family facet value used to narrow the order target list.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    generate_species_targets(order=args.order, output_dir=args.output_dir)
+    generate_species_targets(order=args.order, output_dir=args.output_dir, family=args.family)
     return 0
 
 

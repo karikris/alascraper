@@ -23,7 +23,7 @@ def test_missing_year_facets_are_reported_and_fetch_first_window(
     ]
 
 
-def test_partition_total_mismatch_is_reported_and_adds_salvage_window(
+def test_partition_total_mismatch_is_reported_without_overlapping_salvage_window(
     monkeypatch,
     target: a.SpeciesTarget,
 ) -> None:
@@ -43,12 +43,8 @@ def test_partition_total_mismatch_is_reported_and_adds_salvage_window(
     assert plan.partitions == [
         a.QueryPartition(label="year=2020", extra_fq_filters=("year:2020",), total_records=2_000),
         a.QueryPartition(label="year=2021", extra_fq_filters=("year:2021",), total_records=2_000),
-        a.QueryPartition(
-            label="all",
-            extra_fq_filters=(),
-            total_records=a.SEARCH_API_MAX_WINDOW,
-        ),
     ]
+    assert plan.planned_partition_records == 4_000
 
 
 def test_oversized_year_partition_splits_by_month(

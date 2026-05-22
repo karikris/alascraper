@@ -42,6 +42,7 @@ def test_load_generated_species_targets_reads_generated_json(monkeypatch, tmp_pa
     generated_path.write_text(
         '[{"species_key": "papilio_aegeus", "scientific_name": "Papilio aegeus", '
         '"order": "Lepidoptera", "facet_fields": "species", '
+        '"family": "", '
         '"ala_occurrence_count": 1, "ala_facet_fq": "species:\\"Papilio aegeus\\""}]\n',
         encoding="utf-8",
     )
@@ -57,6 +58,7 @@ def test_load_generated_species_targets_reads_generated_json(monkeypatch, tmp_pa
             common_name=None,
             taxon_lsid=None,
             source_order="Lepidoptera",
+            source_family=None,
             facet_fq_filters=('species:"Papilio aegeus"',),
         )
     ]
@@ -181,6 +183,16 @@ def test_build_params_queries_australian_order_facets() -> None:
     assert ("foffset", 0) in params
 
 
+def test_build_params_can_scope_order_facets_by_family() -> None:
+    params = generator.build_params("Lepidoptera", "species", family="Nymphalidae")
+
+    assert ("q", "*:*") in params
+    assert ("fq", 'country:"Australia"') in params
+    assert ("fq", 'order:"Lepidoptera"') in params
+    assert ("fq", 'family:"Nymphalidae"') in params
+    assert ("facets", "species") in params
+
+
 def test_fetch_order_taxa_pages_past_facet_limit(monkeypatch) -> None:
     monkeypatch.setattr(generator, "FACET_LIMIT", 1)
 
@@ -252,6 +264,7 @@ def test_merge_taxa_deduplicates_species_and_subspecies_rows() -> None:
             "species_key": "acacia_example",
             "scientific_name": "Acacia example",
             "order": "Fabales",
+            "family": "",
             "facet_fields": "species | subspecies",
             "ala_occurrence_count": 10,
             "ala_facet_fq": 'species:"Acacia example" | subspecies:"Acacia example"',
@@ -262,7 +275,11 @@ def test_merge_taxa_deduplicates_species_and_subspecies_rows() -> None:
 def test_generate_species_targets_rejects_empty_valid_target_list(monkeypatch, tmp_path) -> None:
     output_dir = tmp_path / "datasets" / "monocot" / "poales"
     monkeypatch.setattr(generator, "REQUEST_SLEEP_SECONDS", 0)
-    monkeypatch.setattr(generator, "fetch_order_taxa", lambda session, order, facet_field: [])
+    monkeypatch.setattr(
+        generator,
+        "fetch_order_taxa",
+        lambda session, order, facet_field, family=None: [],
+    )
 
     with pytest.raises(ValueError, match="No valid ALA species targets found"):
         generator.generate_species_targets(order="Neuroptera", output_dir=output_dir)
