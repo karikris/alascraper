@@ -219,6 +219,46 @@ datasets/<class_or_misc>/<order>/<family>/
 └── run_log.txt
 ```
 
+## Cleaning + Quality Profiling
+
+Cleaning and quality-inspection scripts live under `scripts/cleaning/`.
+Visualisation scripts will live under `scripts/visuals/`.
+
+Profile family-level Parquet outputs one family at a time:
+
+```bash
+.venv/bin/python scripts/cleaning/profile_family_parquet.py --class Aves
+```
+
+The profiler discovers files shaped like
+`datasets/<class>/<order>/<family>/<family>.parquet`, writes reports under each
+family folder, prints the report paths, prompts for notes about that family, and
+then moves to the next family.
+
+Filter by order or family:
+
+```bash
+.venv/bin/python scripts/cleaning/profile_family_parquet.py --order Lepidoptera
+.venv/bin/python scripts/cleaning/profile_family_parquet.py --family Nymphalidae
+```
+
+Run without notes prompts for batch/test use:
+
+```bash
+.venv/bin/python scripts/cleaning/profile_family_parquet.py --class Aves --no-interactive
+```
+
+Per-family report outputs:
+
+```text
+datasets/<class>/<order>/<family>/quality_reports/
+├── <family>_quality_summary.json
+├── <family>_column_profile.csv
+├── <family>_numeric_stats.csv
+├── <family>_categorical_top_values.csv
+└── family_notes.md                  # only when notes are entered
+```
+
 ## Privacy Defaults
 
 `INCLUDE_USER_DATA_FIELDS = False` omits observer/user and source-linked fields.
