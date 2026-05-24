@@ -315,6 +315,134 @@ def query_share_heatmap_bins(
         con.close()
 
 
+def query_composition_markers(
+    grid_path: Path,
+    filters: SlicerState,
+    *,
+    limit: int = 250_000,
+    locked_color_dimension: str | None = None,
+    top_n: int = 8,
+) -> list[dict[str, Any]]:
+    con = duckdb.connect(":memory:")
+    try:
+        color_by = color_dimension(filters, locked_color_dimension)
+        source = f"read_parquet({sql_string(Path(grid_path).as_posix())})"
+        top_n = max(int(top_n), 1)
+        result = con.execute(
+            f"""
+            WITH filtered AS (
+                SELECT
+                    lat_bin,
+                    lon_bin,
+                    COALESCE(CAST({color_by} AS VARCHAR), 'not supplied') AS active_color_value,
+                    record_count
+                FROM {source}
+                {where_sql(filters)}
+            ),
+            cell_totals AS (
+                SELECT
+                    lat_bin,
+                    lon_bin,
+                    SUM(record_count) AS total_record_count
+                FROM filtered
+                GROUP BY lat_bin, lon_bin
+                ORDER BY total_record_count DESC
+                LIMIT {int(limit)}
+            ),
+            category_counts AS (
+                SELECT
+                    filtered.lat_bin,
+                    filtered.lon_bin,
+                    filtered.active_color_value AS color_value,
+                    SUM(filtered.record_count) AS category_record_count
+                FROM filtered
+                INNER JOIN cell_totals USING (lat_bin, lon_bin)
+                GROUP BY filtered.lat_bin, filtered.lon_bin, filtered.active_color_value
+            ),
+            ranked AS (
+                SELECT
+                    category_counts.*,
+                    cell_totals.total_record_count,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY category_counts.lat_bin, category_counts.lon_bin
+                        ORDER BY category_record_count DESC, color_value
+                    ) AS category_rank
+                FROM category_counts
+                INNER JOIN cell_totals USING (lat_bin, lon_bin)
+            ),
+            labeled AS (
+                SELECT
+                    lat_bin,
+                    lon_bin,
+                    total_record_count,
+                    CASE
+                        WHEN category_rank <= {top_n} THEN color_value
+                        ELSE 'Other'
+                    END AS color_value,
+                    CASE
+                        WHEN category_rank <= {top_n} THEN category_rank
+                        ELSE {top_n + 1}
+                    END AS category_order,
+                    category_record_count
+                FROM ranked
+            ),
+            collapsed AS (
+                SELECT
+                    lat_bin,
+                    lon_bin,
+                    total_record_count,
+                    color_value,
+                    SUM(category_record_count) AS record_count,
+                    MIN(category_order) AS category_order
+                FROM labeled
+                GROUP BY lat_bin, lon_bin, total_record_count, color_value
+            )
+            SELECT
+                lat_bin,
+                lon_bin,
+                total_record_count,
+                color_value,
+                record_count
+            FROM collapsed
+            ORDER BY total_record_count DESC, lat_bin, lon_bin, category_order, color_value
+            """
+        )
+        marker_rows: dict[tuple[Any, Any], dict[str, Any]] = {}
+        for lat_bin, lon_bin, total_record_count, color_value, record_count in result.fetchall():
+            key = (lat_bin, lon_bin)
+            marker = marker_rows.setdefault(
+                key,
+                {
+                    "lat_bin": lat_bin,
+                    "lon_bin": lon_bin,
+                    "total_record_count": int(total_record_count),
+                    "color_level": color_by,
+                    "composition": [],
+                    "composition_text": "",
+                },
+            )
+            count = int(record_count)
+            total = int(total_record_count)
+            share = count / total if total else 0.0
+            marker["composition"].append(
+                {
+                    "value": color_value,
+                    "record_count": count,
+                    "share": share,
+                }
+            )
+
+        for marker in marker_rows.values():
+            marker["composition_text"] = "\n".join(
+                f"{item['value']}: {int(item['record_count']):,} "
+                f"({float(item['share']) * 100:.1f}%)"
+                for item in marker["composition"]
+            )
+        return list(marker_rows.values())
+    finally:
+        con.close()
+
+
 def mapped_record_count(grid_path: Path, filters: SlicerState) -> int:
     con = duckdb.connect(":memory:")
     try:

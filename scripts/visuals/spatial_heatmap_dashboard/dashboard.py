@@ -8,6 +8,7 @@ import math
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -36,8 +37,13 @@ CARTO_POSITRON_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style
 DEFAULT_MAP_POINT_LIMIT = 250_000
 MAP_HEIGHT_PX = 820
 SINGLE_COLOR_MODE = "Single-color bubbles"
+PIECHART_COMPOSITION_MODE = "Piechart composition markers"
 SHARE_HEATMAP_MODE = "Selected-category share heatmap"
-MAP_DISPLAY_MODES = [SINGLE_COLOR_MODE, SHARE_HEATMAP_MODE]
+MAP_DISPLAY_MODES = [SINGLE_COLOR_MODE, PIECHART_COMPOSITION_MODE, SHARE_HEATMAP_MODE]
+PIE_ICON_CANVAS_PX = 128
+PIE_ICON_MIN_SIZE_PX = 18
+PIE_ICON_MAX_SIZE_PX = 58
+OTHER_COLOR_HEX = "#808080"
 COLOR_LEVEL_LABELS = {
     "Family": "family",
     "Genus": "genus",
@@ -71,6 +77,72 @@ def point_radius(record_count: int | float | None) -> float:
     return min(140_000.0, 18_000.0 + math.sqrt(count) * 4_500.0)
 
 
+def color_to_hex(color: list[int]) -> str:
+    return "#" + "".join(f"{channel:02x}" for channel in color[:3])
+
+
+def pie_icon_size(total_record_count: int | float | None) -> int:
+    count = max(float(total_record_count or 0), 1.0)
+    scale = min(math.log10(count) / 4.0, 1.0)
+    return round(PIE_ICON_MIN_SIZE_PX + scale * (PIE_ICON_MAX_SIZE_PX - PIE_ICON_MIN_SIZE_PX))
+
+
+def pie_slice_color(color_level: str | None, value: str | None) -> str:
+    if value == "Other":
+        return OTHER_COLOR_HEX
+    return color_to_hex(map_color(color_level, value))
+
+
+def pie_slice_path(
+    start_angle: float,
+    end_angle: float,
+    *,
+    center: float,
+    radius: float,
+) -> str:
+    start_x = center + radius * math.cos(start_angle)
+    start_y = center + radius * math.sin(start_angle)
+    end_x = center + radius * math.cos(end_angle)
+    end_y = center + radius * math.sin(end_angle)
+    large_arc = 1 if end_angle - start_angle > math.pi else 0
+    return (
+        f"M {center:.3f} {center:.3f} "
+        f"L {start_x:.3f} {start_y:.3f} "
+        f"A {radius:.3f} {radius:.3f} 0 {large_arc} 1 {end_x:.3f} {end_y:.3f} Z"
+    )
+
+
+def build_pie_svg(composition: list[dict[str, Any]], *, color_level: str) -> str:
+    center = PIE_ICON_CANVAS_PX / 2
+    radius = center - 4
+    start_angle = -math.pi / 2
+    paths: list[str] = []
+    for index, item in enumerate(composition):
+        share = max(float(item.get("share") or 0), 0.0)
+        if share <= 0:
+            continue
+        end_angle = start_angle + share * math.tau
+        if index == len(composition) - 1:
+            end_angle = -math.pi / 2 + math.tau - 0.000001
+        color = pie_slice_color(color_level, item.get("value"))
+        path = pie_slice_path(start_angle, end_angle, center=center, radius=radius)
+        paths.append(f'<path d="{path}" fill="{color}" stroke="#ffffff" stroke-width="2"/>')
+        start_angle = end_angle
+
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{PIE_ICON_CANVAS_PX}" '
+        f'height="{PIE_ICON_CANVAS_PX}" viewBox="0 0 {PIE_ICON_CANVAS_PX} {PIE_ICON_CANVAS_PX}">'
+        f'<circle cx="{center}" cy="{center}" r="{radius}" fill="#ffffff" opacity="0.85"/>'
+        + "".join(paths)
+        + f'<circle cx="{center}" cy="{center}" r="{radius}" fill="none" stroke="#111827" stroke-width="2"/>'
+        + "</svg>"
+    )
+
+
+def pie_svg_data_url(svg: str) -> str:
+    return "data:image/svg+xml;charset=utf-8," + quote(svg, safe="")
+
+
 def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -80,6 +152,26 @@ def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+def add_piechart_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    visual_rows = []
+    for row in rows:
+        svg = build_pie_svg(row.get("composition") or [], color_level=row["color_level"])
+        visual_rows.append(
+            {
+                **row,
+                "icon_data": {
+                    "url": pie_svg_data_url(svg),
+                    "width": PIE_ICON_CANVAS_PX,
+                    "height": PIE_ICON_CANVAS_PX,
+                    "anchorX": PIE_ICON_CANVAS_PX // 2,
+                    "anchorY": PIE_ICON_CANVAS_PX // 2,
+                },
+                "icon_size": pie_icon_size(row.get("total_record_count")),
+            }
+        )
+    return visual_rows
 
 
 def share_alpha(share: int | float | None) -> int:
@@ -301,6 +393,38 @@ def render_share_heatmap(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
     st.pydeck_chart(deck, width="stretch", height=MAP_HEIGHT_PX)
 
 
+def render_piechart_composition(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
+    map_rows = add_piechart_visual_fields(rows)
+    layer = pdk.Layer(
+        "IconLayer",
+        map_rows,
+        get_position="[lon_bin, lat_bin]",
+        get_icon="icon_data",
+        get_size="icon_size",
+        size_units="pixels",
+        size_scale=1,
+        pickable=True,
+    )
+    deck = pdk.Deck(
+        map_style=CARTO_POSITRON_STYLE,
+        initial_view_state=pdk.ViewState(
+            latitude=-25.3,
+            longitude=134.5,
+            zoom=3.2,
+            pitch=0,
+        ),
+        layers=[layer],
+        tooltip={
+            "text": (
+                "{color_level} composition\n"
+                "Total records: {total_record_count}\n"
+                "{composition_text}"
+            )
+        },
+    )
+    st.pydeck_chart(deck, width="stretch", height=MAP_HEIGHT_PX)
+
+
 def main() -> None:
     try:
         import pydeck as pdk
@@ -398,7 +522,14 @@ def main() -> None:
         )
         focus_value = share_focus_selector(max_controls, focus_options)
 
-    if map_display_mode == SHARE_HEATMAP_MODE and focus_value:
+    if map_display_mode == PIECHART_COMPOSITION_MODE:
+        rows = query.query_composition_markers(
+            grid_path,
+            slicers,
+            limit=map_point_limit,
+            locked_color_dimension=locked_color_dimension,
+        )
+    elif map_display_mode == SHARE_HEATMAP_MODE and focus_value:
         rows = query.query_share_heatmap_bins(
             grid_path,
             slicers,
@@ -417,15 +548,26 @@ def main() -> None:
         )
     years = query.year_summary(grid_path, slicers)
     matching_records = query.mapped_record_count(grid_path, slicers)
-    total_records = sum(int(row["record_count"]) for row in rows)
-    summary.metric("Map bins", f"{len(rows):,}")
+    if map_display_mode == PIECHART_COMPOSITION_MODE:
+        total_records = sum(int(row["total_record_count"]) for row in rows)
+    else:
+        total_records = sum(int(row["record_count"]) for row in rows)
+    summary.metric(
+        "Map points" if map_display_mode == PIECHART_COMPOSITION_MODE else "Map bins",
+        f"{len(rows):,}",
+    )
     if map_display_mode == SHARE_HEATMAP_MODE:
         summary.metric("Focused records", f"{total_records:,}")
     else:
         summary.metric("Visible records", f"{total_records:,}")
     summary.metric("Matching records", f"{matching_records:,}")
     summary.metric("Years", f"{len(years):,}")
-    if map_display_mode == SHARE_HEATMAP_MODE and len(rows) >= map_point_limit:
+    if map_display_mode == PIECHART_COMPOSITION_MODE and total_records < matching_records:
+        summary.warning(
+            f"Map point cap is hiding {matching_records - total_records:,} matching records. "
+            "Increase Max map points or narrow the slicers."
+        )
+    elif map_display_mode == SHARE_HEATMAP_MODE and len(rows) >= map_point_limit:
         summary.warning(
             "Map point cap may be hiding focused map points. "
             "Increase Max map points or narrow the slicers."
@@ -436,7 +578,9 @@ def main() -> None:
             "Increase Max map points or narrow the slicers."
         )
 
-    if map_display_mode == SHARE_HEATMAP_MODE:
+    if map_display_mode == PIECHART_COMPOSITION_MODE:
+        render_piechart_composition(rows, st, pdk)
+    elif map_display_mode == SHARE_HEATMAP_MODE:
         render_share_heatmap(rows, st, pdk)
     else:
         render_map(rows, st, pdk)

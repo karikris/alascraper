@@ -49,6 +49,28 @@ def write_share_fixture(path: Path) -> None:
     ).write_parquet(path)
 
 
+def write_many_category_fixture(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    values = [f"Genus {index}" for index in range(10)]
+    pl.DataFrame(
+        {
+            "lat_bin": [-37.8] * 10,
+            "lon_bin": [145.0] * 10,
+            "family": ["A"] * 10,
+            "genus": values,
+            "species": [f"{value} species" for value in values],
+            "scientificName": [f"{value} species" for value in values],
+            "stateProvince": ["Victoria"] * 10,
+            "year": [2010] * 10,
+            "record_count": list(range(10, 0, -1)),
+            "distinct_scientific_names": [1] * 10,
+            "distinct_taxon_concepts": [1] * 10,
+            "min_year": [2010] * 10,
+            "max_year": [2010] * 10,
+        }
+    ).write_parquet(path)
+
+
 def test_build_grid_bins_excludes_null_coordinates_and_aggregates(
     tmp_path: Path,
 ) -> None:
@@ -182,6 +204,84 @@ def test_share_heatmap_state_and_year_filters_do_not_change_color_level(
     assert rows[0]["share"] == 1.0
 
 
+def test_composition_markers_return_one_row_per_coordinate_with_shares(
+    tmp_path: Path,
+) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_share_fixture(grid)
+
+    rows = query.query_composition_markers(
+        grid,
+        query.SlicerState(include_states=["Victoria"]),
+        locked_color_dimension="family",
+    )
+
+    assert rows == [
+        {
+            "lat_bin": -37.8,
+            "lon_bin": 145.0,
+            "total_record_count": 10,
+            "color_level": "family",
+            "composition": [
+                {"value": "A", "record_count": 7, "share": 0.7},
+                {"value": "B", "record_count": 3, "share": 0.3},
+            ],
+            "composition_text": "A: 7 (70.0%)\nB: 3 (30.0%)",
+        }
+    ]
+
+
+def test_composition_markers_state_and_year_filters_do_not_change_color_level(
+    tmp_path: Path,
+) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_share_fixture(grid)
+    filters = query.SlicerState(
+        include_families=["A"],
+        include_states=["Victoria"],
+        year_min=2011,
+        year_max=2011,
+    )
+
+    rows = query.query_composition_markers(grid, filters)
+
+    assert rows[0]["color_level"] == "genus"
+    assert rows[0]["total_record_count"] == 1
+    assert rows[0]["composition"] == [
+        {"value": "Alpha", "record_count": 1, "share": 1.0}
+    ]
+
+
+def test_composition_markers_collapse_deep_levels_to_top_values_and_other(
+    tmp_path: Path,
+) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_many_category_fixture(grid)
+
+    rows = query.query_composition_markers(
+        grid,
+        query.SlicerState(include_families=["A"]),
+        top_n=8,
+    )
+
+    composition = rows[0]["composition"]
+    assert rows[0]["color_level"] == "genus"
+    assert rows[0]["total_record_count"] == 55
+    assert [item["value"] for item in composition] == [
+        "Genus 0",
+        "Genus 1",
+        "Genus 2",
+        "Genus 3",
+        "Genus 4",
+        "Genus 5",
+        "Genus 6",
+        "Genus 7",
+        "Other",
+    ]
+    assert composition[-1] == {"value": "Other", "record_count": 3, "share": 3 / 55}
+    assert round(sum(item["share"] for item in composition), 10) == 1.0
+
+
 def test_cross_filter_options_respect_current_slicer_state(tmp_path: Path) -> None:
     source = tmp_path / "butterflies_cleaned.parquet"
     out_dir = tmp_path / "dashboard"
@@ -263,6 +363,50 @@ def test_dashboard_precomputes_share_heatmap_visual_fields() -> None:
     assert rows[0]["radius"] == 27_000
     assert rows[0]["color"][:3] == dashboard.FAMILY_COLORS["Nymphalidae"][:3]
     assert rows[0]["color"][3] < rows[1]["color"][3]
+
+
+def test_dashboard_builds_piechart_icon_visual_fields() -> None:
+    rows = dashboard.add_piechart_visual_fields(
+        [
+            {
+                "total_record_count": 10,
+                "color_level": "family",
+                "composition": [
+                    {"value": "Nymphalidae", "record_count": 7, "share": 0.7},
+                    {"value": "Lycaenidae", "record_count": 3, "share": 0.3},
+                ],
+            }
+        ]
+    )
+
+    assert rows[0]["icon_size"] > dashboard.PIE_ICON_MIN_SIZE_PX
+    assert rows[0]["icon_data"]["url"].startswith("data:image/svg+xml;charset=utf-8,")
+    assert rows[0]["icon_data"]["width"] == dashboard.PIE_ICON_CANVAS_PX
+    assert rows[0]["icon_data"]["height"] == dashboard.PIE_ICON_CANVAS_PX
+
+
+def test_dashboard_piechart_size_uses_total_observation_count() -> None:
+    assert dashboard.pie_icon_size(1) == dashboard.PIE_ICON_MIN_SIZE_PX
+    assert dashboard.pie_icon_size(1_000) > dashboard.pie_icon_size(10)
+    assert dashboard.pie_icon_size(1_000_000) == dashboard.PIE_ICON_MAX_SIZE_PX
+
+
+def test_dashboard_pie_svg_contains_one_path_per_slice() -> None:
+    svg = dashboard.build_pie_svg(
+        [
+            {"value": "Nymphalidae", "record_count": 7, "share": 0.7},
+            {"value": "Other", "record_count": 3, "share": 0.3},
+        ],
+        color_level="family",
+    )
+
+    assert svg.count("<path") == 2
+    assert dashboard.color_to_hex(dashboard.FAMILY_COLORS["Nymphalidae"]) in svg
+    assert dashboard.OTHER_COLOR_HEX in svg
+
+
+def test_dashboard_map_display_modes_include_piechart_composition() -> None:
+    assert dashboard.PIECHART_COMPOSITION_MODE in dashboard.MAP_DISPLAY_MODES
 
 
 def test_dashboard_title_is_butterfly_dashboard() -> None:
