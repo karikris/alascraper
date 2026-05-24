@@ -144,6 +144,7 @@ def test_dashboard_precomputes_deck_visual_fields() -> None:
     rows = dashboard.add_visual_fields(
         [
             {
+                "color_level": "genus",
                 "color_value": "Alpha",
                 "species": "Alpha one",
                 "record_count": 4,
@@ -155,6 +156,14 @@ def test_dashboard_precomputes_deck_visual_fields() -> None:
 
     assert rows[0]["color"] == dashboard.stable_color("Alpha")
     assert rows[0]["radius"] == 27_000
+
+
+def test_dashboard_uses_fixed_family_palette() -> None:
+    rows = dashboard.add_visual_fields(
+        [{"color_level": "family", "color_value": "Nymphalidae", "record_count": 1}]
+    )
+
+    assert rows[0]["color"] == dashboard.FAMILY_COLORS["Nymphalidae"]
 
 
 def test_dashboard_full_year_range_does_not_filter_unknown_years() -> None:

@@ -34,12 +34,26 @@ MAINLAND_STATES = [
 CARTO_POSITRON_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 DEFAULT_MAP_POINT_LIMIT = 250_000
 MAP_HEIGHT_PX = 820
+FAMILY_COLORS = {
+    "Hesperiidae": [220, 38, 38, 190],
+    "Lycaenidae": [22, 163, 74, 190],
+    "Nymphalidae": [37, 99, 235, 190],
+    "Papilionidae": [234, 179, 8, 190],
+    "Pieridae": [147, 51, 234, 190],
+    "Riodinidae": [249, 115, 22, 190],
+}
 
 
 def stable_color(value: str | None) -> list[int]:
     text = value or "not supplied"
     digest = hashlib.sha256(text.encode("utf-8")).digest()
     return [80 + digest[0] % 150, 70 + digest[1] % 160, 90 + digest[2] % 140, 170]
+
+
+def map_color(color_level: str | None, color_value: str | None) -> list[int]:
+    if color_level == "family" and color_value in FAMILY_COLORS:
+        return FAMILY_COLORS[color_value]
+    return stable_color(color_value)
 
 
 def point_radius(record_count: int | float | None) -> float:
@@ -51,7 +65,7 @@ def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             **row,
-            "color": stable_color(row.get("color_value")),
+            "color": map_color(row.get("color_level"), row.get("color_value")),
             "radius": point_radius(row.get("record_count")),
         }
         for row in rows
