@@ -15,7 +15,7 @@ import polars as pl
 
 DEFAULT_SOURCE_PATH = Path("datasets/insecta/lepidoptera/butterflies_cleaned.parquet")
 DEFAULT_OUTPUT_DIR = Path("datasets/insecta/lepidoptera/dashboard")
-DEFAULT_GRID_DECIMALS = 1
+DEFAULT_GRID_DECIMALS = 0
 
 
 @dataclass(frozen=True)

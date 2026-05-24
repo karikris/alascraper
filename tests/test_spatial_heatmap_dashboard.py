@@ -87,6 +87,7 @@ def test_query_grid_bins_applies_include_exclude_and_year_range(
     assert len(rows) == 2
     assert {row["family"] for row in rows} == {"A"}
     assert sum(row["record_count"] for row in rows) == 2
+    assert query.mapped_record_count(outputs.grid_bins, filters) == 2
 
 
 def test_cross_filter_options_respect_current_slicer_state(tmp_path: Path) -> None:
@@ -136,4 +137,4 @@ def test_dashboard_precomputes_deck_visual_fields() -> None:
     )
 
     assert rows[0]["color"] == dashboard.species_color("Alpha one")
-    assert rows[0]["radius"] == 700
+    assert rows[0]["radius"] == 13_000

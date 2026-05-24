@@ -67,7 +67,7 @@ def query_grid_bins(
     grid_path: Path,
     filters: SlicerState,
     *,
-    limit: int = 50_000,
+    limit: int = 250_000,
 ) -> list[dict[str, Any]]:
     con = duckdb.connect(":memory:")
     try:
@@ -77,20 +77,40 @@ def query_grid_bins(
                 lon_bin,
                 family,
                 species,
-                year,
                 stateProvince,
                 SUM(record_count) AS record_count,
                 SUM(distinct_scientific_names) AS distinct_scientific_names,
-                SUM(distinct_taxon_concepts) AS distinct_taxon_concepts
+                SUM(distinct_taxon_concepts) AS distinct_taxon_concepts,
+                MIN(min_year) AS min_year,
+                MAX(max_year) AS max_year,
+                CASE
+                    WHEN MIN(min_year) = MAX(max_year) THEN CAST(MIN(min_year) AS VARCHAR)
+                    ELSE CAST(MIN(min_year) AS VARCHAR) || '-' || CAST(MAX(max_year) AS VARCHAR)
+                END AS year_range
             FROM read_parquet({sql_string(Path(grid_path).as_posix())})
             {where_sql(filters)}
-            GROUP BY lat_bin, lon_bin, family, species, year, stateProvince
+            GROUP BY lat_bin, lon_bin, family, species, stateProvince
             ORDER BY record_count DESC
             LIMIT {int(limit)}
         """
         result = con.execute(query)
         columns = [item[0] for item in result.description]
         return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+    finally:
+        con.close()
+
+
+def mapped_record_count(grid_path: Path, filters: SlicerState) -> int:
+    con = duckdb.connect(":memory:")
+    try:
+        row = con.execute(
+            f"""
+            SELECT COALESCE(SUM(record_count), 0) AS record_count
+            FROM read_parquet({sql_string(Path(grid_path).as_posix())})
+            {where_sql(filters)}
+            """
+        ).fetchone()
+        return int(row[0])
     finally:
         con.close()
 

@@ -289,7 +289,9 @@ Omit `--no-external-lookup` to allow guarded GBIF species-match fallback for
 unresolved names. The script writes `butterflies_cleaned.parquet`, unresolved
 taxonomy rows, and month value counts.
 
-Build rounded-coordinate spatial bins for the dashboard:
+Build rounded-coordinate spatial bins for the dashboard. The default rounds
+coordinates to whole degrees for a national-scale overview; pass
+`--grid-decimals 1` for finer roughly 0.1-degree bins.
 
 ```bash
 .venv/bin/python scripts/visuals/spatial_heatmap_dashboard/build_spatial_bins.py
@@ -303,7 +305,8 @@ Run the local dashboard after installing requirements:
 
 The dashboard uses central cross-filtering slicers for family, species, year
 range, and state/territory include/exclude selections. The default map source is
-the pre-aggregated grid Parquet, not the raw occurrence rows.
+the pre-aggregated grid Parquet, not the raw occurrence rows. It reports both
+visible records and total matching mapped records so map-point caps are explicit.
 
 ## Privacy Defaults
 

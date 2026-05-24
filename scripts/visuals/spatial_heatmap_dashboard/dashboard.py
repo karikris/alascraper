@@ -32,6 +32,7 @@ MAINLAND_STATES = [
     "Western Australia",
 ]
 CARTO_POSITRON_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+DEFAULT_MAP_POINT_LIMIT = 250_000
 
 
 def species_color(species: str | None) -> list[int]:
@@ -42,7 +43,7 @@ def species_color(species: str | None) -> list[int]:
 
 def point_radius(record_count: int | float | None) -> float:
     count = max(float(record_count or 0), 1.0)
-    return math.sqrt(count) * 350
+    return min(85_000.0, 8_000.0 + math.sqrt(count) * 2_500.0)
 
 
 def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -109,6 +110,18 @@ def build_partial_slicer_state(options: dict[str, list[Any]], st: Any) -> query.
     )
 
 
+def map_point_limit_selector(st: Any) -> int:
+    return int(
+        st.number_input(
+            "Max map points",
+            min_value=10_000,
+            max_value=1_000_000,
+            value=DEFAULT_MAP_POINT_LIMIT,
+            step=10_000,
+        )
+    )
+
+
 def render_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
     map_rows = add_visual_fields(rows)
     layer = pdk.Layer(
@@ -133,7 +146,7 @@ def render_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
             "text": (
                 "{species}\n"
                 "{family}\n"
-                "{stateProvince}, {year}\n"
+                "{stateProvince}, {year_range}\n"
                 "Records: {record_count}"
             )
         },
@@ -159,6 +172,7 @@ def main() -> None:
     if not grid_path.exists():
         st.error(f"Missing grid bins: {grid_path}")
         st.stop()
+    map_point_limit = map_point_limit_selector(st.sidebar)
 
     base_options = query.option_values(grid_path, query.SlicerState())
     partial_slicers = build_partial_slicer_state(base_options, st.sidebar)
@@ -181,13 +195,20 @@ def main() -> None:
         f"States: {len(filtered_options['states'])}"
     )
 
-    rows = query.query_grid_bins(grid_path, slicers)
+    rows = query.query_grid_bins(grid_path, slicers, limit=map_point_limit)
     years = query.year_summary(grid_path, slicers)
+    matching_records = query.mapped_record_count(grid_path, slicers)
     total_records = sum(int(row["record_count"]) for row in rows)
-    col_a, col_b, col_c = st.columns(3)
+    col_a, col_b, col_c, col_d = st.columns(4)
     col_a.metric("Map bins", f"{len(rows):,}")
-    col_b.metric("Mapped records", f"{total_records:,}")
-    col_c.metric("Years", f"{len(years):,}")
+    col_b.metric("Visible records", f"{total_records:,}")
+    col_c.metric("Matching records", f"{matching_records:,}")
+    col_d.metric("Years", f"{len(years):,}")
+    if total_records < matching_records:
+        st.warning(
+            f"Map point cap is hiding {matching_records - total_records:,} matching records. "
+            "Increase Max map points or narrow the slicers."
+        )
 
     render_map(rows, st, pdk)
     st.subheader("Year comparison")
