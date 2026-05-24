@@ -52,6 +52,7 @@ def test_build_grid_bins_excludes_null_coordinates_and_aggregates(
         "family",
         "genus",
         "species",
+        "scientificName",
         "year",
         "stateProvince",
         "record_count",
@@ -63,6 +64,7 @@ def test_build_grid_bins_excludes_null_coordinates_and_aggregates(
     assert dimensions["mapped_row_count"] == 3
     assert dimensions["genus_values"] == ["Alpha", "Beta", "Gamma"]
     assert dimensions["species_values"] == ["Alpha one", "Beta one", "Gamma one"]
+    assert dimensions["scientific_name_values"] == ["Alpha one", "Beta one", "Gamma one", "Unknown"]
 
 
 def test_query_grid_bins_applies_include_exclude_and_year_range(
@@ -90,6 +92,8 @@ def test_query_grid_bins_applies_include_exclude_and_year_range(
 
     assert len(rows) == 2
     assert {row["family"] for row in rows} == {"A"}
+    assert {row["color_level"] for row in rows} == {"scientificName"}
+    assert {row["color_value"] for row in rows} == {"Alpha one"}
     assert sum(row["record_count"] for row in rows) == 2
     assert query.mapped_record_count(outputs.grid_bins, filters) == 2
 
@@ -140,7 +144,7 @@ def test_dashboard_precomputes_deck_visual_fields() -> None:
     rows = dashboard.add_visual_fields(
         [
             {
-                "genus": "Alpha",
+                "color_value": "Alpha",
                 "species": "Alpha one",
                 "record_count": 4,
                 "lat_bin": -37.8,
@@ -149,7 +153,7 @@ def test_dashboard_precomputes_deck_visual_fields() -> None:
         ]
     )
 
-    assert rows[0]["color"] == dashboard.genus_color("Alpha")
+    assert rows[0]["color"] == dashboard.stable_color("Alpha")
     assert rows[0]["radius"] == 27_000
 
 
@@ -158,3 +162,14 @@ def test_dashboard_full_year_range_does_not_filter_unknown_years() -> None:
 
     assert dashboard.active_year_bounds(years, (2010, 2012)) == (None, None)
     assert dashboard.active_year_bounds(years, (2011, 2012)) == (2011, 2012)
+
+
+def test_query_color_dimension_follows_taxonomy_filter_specificity() -> None:
+    assert query.color_dimension(query.SlicerState()) == "family"
+    assert query.color_dimension(query.SlicerState(include_families=["A"])) == "genus"
+    assert query.color_dimension(query.SlicerState(exclude_families=["A"])) == "genus"
+    assert query.color_dimension(query.SlicerState(include_genera=["Alpha"])) == "species"
+    assert (
+        query.color_dimension(query.SlicerState(include_species=["Alpha one"]))
+        == "scientificName"
+    )

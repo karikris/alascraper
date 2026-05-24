@@ -29,6 +29,26 @@ FILTER_COLUMNS = {
     "species": ("include_species", "exclude_species"),
     "stateProvince": ("include_states", "exclude_states"),
 }
+TAXONOMY_FILTERS = (
+    ("species", "include_species", "exclude_species", "scientificName"),
+    ("genus", "include_genera", "exclude_genera", "species"),
+    ("family", "include_families", "exclude_families", "genus"),
+)
+GROUP_COLUMNS_BY_COLOR_DIMENSION = {
+    "family": ["lat_bin", "lon_bin", "family", "stateProvince"],
+    "genus": ["lat_bin", "lon_bin", "family", "genus", "stateProvince"],
+    "species": ["lat_bin", "lon_bin", "family", "genus", "species", "stateProvince"],
+    "scientificName": [
+        "lat_bin",
+        "lon_bin",
+        "family",
+        "genus",
+        "species",
+        "scientificName",
+        "stateProvince",
+    ],
+}
+DISPLAY_COLUMNS = ["family", "genus", "species", "scientificName", "stateProvince"]
 
 
 def sql_string(value: str | Path) -> str:
@@ -66,6 +86,20 @@ def where_sql(filters: SlicerState, *, skip_column: str | None = None) -> str:
     return "WHERE " + " AND ".join(clauses) if clauses else ""
 
 
+def color_dimension(filters: SlicerState) -> str:
+    for _, include_attr, exclude_attr, dimension in TAXONOMY_FILTERS:
+        if getattr(filters, include_attr) or getattr(filters, exclude_attr):
+            return dimension
+    return "family"
+
+
+def grouped_select_columns(group_columns: list[str]) -> str:
+    selected: list[str] = []
+    for column in ["lat_bin", "lon_bin", *DISPLAY_COLUMNS]:
+        selected.append(column if column in group_columns else f"NULL AS {column}")
+    return ",\n                ".join(selected)
+
+
 def query_grid_bins(
     grid_path: Path,
     filters: SlicerState,
@@ -74,14 +108,12 @@ def query_grid_bins(
 ) -> list[dict[str, Any]]:
     con = duckdb.connect(":memory:")
     try:
+        color_by = color_dimension(filters)
+        group_columns = GROUP_COLUMNS_BY_COLOR_DIMENSION[color_by]
+        group_sql = ", ".join(group_columns)
         query = f"""
             SELECT
-                lat_bin,
-                lon_bin,
-                family,
-                genus,
-                species,
-                stateProvince,
+                {grouped_select_columns(group_columns)},
                 SUM(record_count) AS record_count,
                 SUM(distinct_scientific_names) AS distinct_scientific_names,
                 SUM(distinct_taxon_concepts) AS distinct_taxon_concepts,
@@ -90,10 +122,12 @@ def query_grid_bins(
                 CASE
                     WHEN MIN(min_year) = MAX(max_year) THEN CAST(MIN(min_year) AS VARCHAR)
                     ELSE CAST(MIN(min_year) AS VARCHAR) || '-' || CAST(MAX(max_year) AS VARCHAR)
-                END AS year_range
+                END AS year_range,
+                {sql_string(color_by)} AS color_level,
+                COALESCE(CAST({color_by} AS VARCHAR), 'not supplied') AS color_value
             FROM read_parquet({sql_string(Path(grid_path).as_posix())})
             {where_sql(filters)}
-            GROUP BY lat_bin, lon_bin, family, genus, species, stateProvince
+            GROUP BY {group_sql}
             ORDER BY record_count DESC
             LIMIT {int(limit)}
         """

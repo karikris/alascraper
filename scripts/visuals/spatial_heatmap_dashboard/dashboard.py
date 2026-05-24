@@ -36,8 +36,8 @@ DEFAULT_MAP_POINT_LIMIT = 250_000
 MAP_HEIGHT_PX = 820
 
 
-def genus_color(genus: str | None) -> list[int]:
-    text = genus or "not supplied"
+def stable_color(value: str | None) -> list[int]:
+    text = value or "not supplied"
     digest = hashlib.sha256(text.encode("utf-8")).digest()
     return [80 + digest[0] % 150, 70 + digest[1] % 160, 90 + digest[2] % 140, 170]
 
@@ -51,7 +51,7 @@ def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             **row,
-            "color": genus_color(row.get("genus")),
+            "color": stable_color(row.get("color_value")),
             "radius": point_radius(row.get("record_count")),
         }
         for row in rows
@@ -69,22 +69,35 @@ def filter_mode(prefix: str, values: list[str], st: Any) -> tuple[list[str], lis
     return (selected, []) if mode == "Include" else ([], selected)
 
 
+def state_preset_values(preset: str, states: list[str]) -> list[str]:
+    if preset == "East coast":
+        return [state for state in EAST_COAST_STATES if state in states]
+    if preset == "Mainland":
+        return [state for state in MAINLAND_STATES if state in states]
+    if preset == "All":
+        return states
+    return []
+
+
 def state_selector(states: list[str], st: Any) -> tuple[list[str], list[str]]:
-    preset = st.selectbox(
+    if "state_values" in st.session_state:
+        st.session_state["state_values"] = [
+            state for state in st.session_state["state_values"] if state in states
+        ]
+
+    def apply_state_preset() -> None:
+        preset = st.session_state.get("state_preset", "Custom")
+        st.session_state["state_values"] = state_preset_values(preset, states)
+
+    mode = st.radio("State mode", ["Include", "Exclude"], horizontal=True, key="state_mode")
+    selected = st.multiselect("State/territory", states, key="state_values")
+    st.selectbox(
         "State preset",
         ["Custom", "East coast", "Mainland", "All"],
         index=0,
+        key="state_preset",
+        on_change=apply_state_preset,
     )
-    default_values: list[str] = []
-    if preset == "East coast":
-        default_values = [state for state in EAST_COAST_STATES if state in states]
-    elif preset == "Mainland":
-        default_values = [state for state in MAINLAND_STATES if state in states]
-    elif preset == "All":
-        default_values = states
-
-    mode = st.radio("State mode", ["Include", "Exclude"], horizontal=True)
-    selected = st.multiselect("State/territory", states, default=default_values)
     return (selected, []) if mode == "Include" else ([], selected)
 
 
@@ -158,10 +171,13 @@ def render_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
         layers=[layer],
         tooltip={
             "text": (
-                "{species}\n"
-                "{genus}\n"
-                "{family}\n"
-                "{stateProvince}, {year_range}\n"
+                "{color_level}: {color_value}\n"
+                "Family: {family}\n"
+                "Genus: {genus}\n"
+                "Species: {species}\n"
+                "Scientific name: {scientificName}\n"
+                "State: {stateProvince}\n"
+                "Years: {year_range}\n"
                 "Records: {record_count}"
             )
         },
@@ -195,20 +211,19 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.title("Butterfly Spatial Heatmap")
-    grid_path = Path(
-        st.sidebar.text_input("Grid bins parquet", value=str(DEFAULT_GRID_PATH))
-    )
+    controls = st.sidebar.container()
+    config = st.sidebar.container()
+    summary = st.sidebar.container()
+    grid_path = Path(config.text_input("Grid bins parquet", value=str(DEFAULT_GRID_PATH)))
     if not grid_path.exists():
         st.error(f"Missing grid bins: {grid_path}")
         st.stop()
-    map_point_limit = map_point_limit_selector(st.sidebar)
-    show_year_comparison = st.sidebar.checkbox("Show year comparison", value=False)
-    show_filtered_rows = st.sidebar.checkbox("Show filtered rows", value=False)
 
     base_options = query.option_values(grid_path, query.SlicerState())
-    partial_slicers = build_partial_slicer_state(base_options, st.sidebar)
+    map_point_limit = map_point_limit_selector(controls)
+    partial_slicers = build_partial_slicer_state(base_options, controls)
     genus_options = query.option_values(grid_path, partial_slicers)["genera"]
-    include_genera, exclude_genera = filter_mode("Genus", genus_options, st.sidebar)
+    include_genera, exclude_genera = filter_mode("Genus", genus_options, controls)
     genus_slicers = query.SlicerState(
         include_families=partial_slicers.include_families,
         exclude_families=partial_slicers.exclude_families,
@@ -220,7 +235,9 @@ def main() -> None:
         year_max=partial_slicers.year_max,
     )
     species_options = query.option_values(grid_path, genus_slicers)["species"]
-    include_species, exclude_species = filter_mode("Species", species_options, st.sidebar)
+    include_species, exclude_species = filter_mode("Species", species_options, controls)
+    show_year_comparison = controls.checkbox("Show year comparison", value=False)
+    show_filtered_rows = controls.checkbox("Show filtered rows", value=False)
     slicers = query.SlicerState(
         include_families=partial_slicers.include_families,
         exclude_families=partial_slicers.exclude_families,
@@ -234,7 +251,8 @@ def main() -> None:
         year_max=partial_slicers.year_max,
     )
     filtered_options = query.option_values(grid_path, slicers)
-    st.sidebar.caption(
+    summary.subheader("Summary statistics")
+    summary.caption(
         f"Families: {len(filtered_options['families'])} | "
         f"Genera: {len(filtered_options['genera'])} | "
         f"Species: {len(filtered_options['species'])} | "
@@ -245,12 +263,12 @@ def main() -> None:
     years = query.year_summary(grid_path, slicers)
     matching_records = query.mapped_record_count(grid_path, slicers)
     total_records = sum(int(row["record_count"]) for row in rows)
-    st.sidebar.metric("Map bins", f"{len(rows):,}")
-    st.sidebar.metric("Visible records", f"{total_records:,}")
-    st.sidebar.metric("Matching records", f"{matching_records:,}")
-    st.sidebar.metric("Years", f"{len(years):,}")
+    summary.metric("Map bins", f"{len(rows):,}")
+    summary.metric("Visible records", f"{total_records:,}")
+    summary.metric("Matching records", f"{matching_records:,}")
+    summary.metric("Years", f"{len(years):,}")
     if total_records < matching_records:
-        st.sidebar.warning(
+        summary.warning(
             f"Map point cap is hiding {matching_records - total_records:,} matching records. "
             "Increase Max map points or narrow the slicers."
         )

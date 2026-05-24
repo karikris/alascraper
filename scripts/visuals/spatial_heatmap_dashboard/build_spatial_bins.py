@@ -51,6 +51,7 @@ def grid_aggregates(lazy_frame: pl.LazyFrame, grid_decimals: int) -> pl.DataFram
         "family",
         "genus",
         "species",
+        "scientificName",
         "year",
         "stateProvince",
     ]
@@ -88,6 +89,9 @@ def dimension_values(lazy_frame: pl.LazyFrame, mapped_row_count: int) -> dict[st
     genus_values = lazy_frame.select(
         pl.col("genus").drop_nulls().unique().sort()
     ).collect().to_series().to_list()
+    scientific_name_values = lazy_frame.select(
+        pl.col("scientificName").drop_nulls().unique().sort()
+    ).collect().to_series().to_list()
     state_values = lazy_frame.select(
         pl.col("stateProvince").drop_nulls().unique().sort()
     ).collect().to_series().to_list()
@@ -101,6 +105,7 @@ def dimension_values(lazy_frame: pl.LazyFrame, mapped_row_count: int) -> dict[st
         "family_values": family_values,
         "genus_values": genus_values,
         "species_values": species_values,
+        "scientific_name_values": scientific_name_values,
         "state_values": state_values,
         "year_values": year_values,
         "min_year": row["min_year"],
