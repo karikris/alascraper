@@ -138,3 +138,10 @@ def test_dashboard_precomputes_deck_visual_fields() -> None:
 
     assert rows[0]["color"] == dashboard.species_color("Alpha one")
     assert rows[0]["radius"] == 27_000
+
+
+def test_dashboard_full_year_range_does_not_filter_unknown_years() -> None:
+    years = [2010, 2011, 2012]
+
+    assert dashboard.active_year_bounds(years, (2010, 2012)) == (None, None)
+    assert dashboard.active_year_bounds(years, (2011, 2012)) == (2011, 2012)

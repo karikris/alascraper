@@ -88,6 +88,18 @@ def state_selector(states: list[str], st: Any) -> tuple[list[str], list[str]]:
     return (selected, []) if mode == "Include" else ([], selected)
 
 
+def active_year_bounds(
+    years: list[int],
+    selected_range: tuple[int, int],
+) -> tuple[int | None, int | None]:
+    if not years:
+        return None, None
+    full_range = (min(years), max(years))
+    if selected_range == full_range:
+        return None, None
+    return selected_range
+
+
 def build_partial_slicer_state(options: dict[str, list[Any]], st: Any) -> query.SlicerState:
     include_families, exclude_families = filter_mode("Family", options["families"], st)
     include_states, exclude_states = state_selector(options["states"], st)
@@ -101,13 +113,14 @@ def build_partial_slicer_state(options: dict[str, list[Any]], st: Any) -> query.
         value=(year_min or 0, year_max or 0),
         disabled=not years,
     )
+    active_year_min, active_year_max = active_year_bounds(years, selected_range)
     return query.SlicerState(
         include_families=include_families,
         exclude_families=exclude_families,
         include_states=include_states,
         exclude_states=exclude_states,
-        year_min=selected_range[0] if years else None,
-        year_max=selected_range[1] if years else None,
+        year_min=active_year_min,
+        year_max=active_year_max,
     )
 
 
