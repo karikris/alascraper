@@ -119,15 +119,17 @@ def active_year_bounds(
 
 def build_partial_slicer_state(
     options: dict[str, list[Any]],
-    st: Any,
+    family_st: Any,
+    state_st: Any,
+    year_st: Any,
     session_state: Any,
 ) -> query.SlicerState:
-    include_families, exclude_families = filter_mode("Family", options["families"], st)
-    include_states, exclude_states = state_selector(options["states"], st, session_state)
+    include_families, exclude_families = filter_mode("Family", options["families"], family_st)
+    include_states, exclude_states = state_selector(options["states"], state_st, session_state)
     years = [int(year) for year in options["years"] if year is not None]
     year_min = min(years) if years else None
     year_max = max(years) if years else None
-    selected_range = st.slider(
+    selected_range = year_st.slider(
         "Year range",
         min_value=year_min or 0,
         max_value=year_max or 0,
@@ -219,7 +221,13 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.title("Butterfly Spatial Heatmap")
-    controls = st.sidebar.container()
+    max_controls = st.sidebar.container()
+    family_controls = st.sidebar.container()
+    genus_controls = st.sidebar.container()
+    species_controls = st.sidebar.container()
+    state_controls = st.sidebar.container()
+    year_controls = st.sidebar.container()
+    display_controls = st.sidebar.container()
     config = st.sidebar.container()
     summary = st.sidebar.container()
     grid_path = Path(config.text_input("Grid bins parquet", value=str(DEFAULT_GRID_PATH)))
@@ -228,10 +236,16 @@ def main() -> None:
         st.stop()
 
     base_options = query.option_values(grid_path, query.SlicerState())
-    map_point_limit = map_point_limit_selector(controls)
-    partial_slicers = build_partial_slicer_state(base_options, controls, st.session_state)
+    map_point_limit = map_point_limit_selector(max_controls)
+    partial_slicers = build_partial_slicer_state(
+        base_options,
+        family_controls,
+        state_controls,
+        year_controls,
+        st.session_state,
+    )
     genus_options = query.option_values(grid_path, partial_slicers)["genera"]
-    include_genera, exclude_genera = filter_mode("Genus", genus_options, controls)
+    include_genera, exclude_genera = filter_mode("Genus", genus_options, genus_controls)
     genus_slicers = query.SlicerState(
         include_families=partial_slicers.include_families,
         exclude_families=partial_slicers.exclude_families,
@@ -243,9 +257,9 @@ def main() -> None:
         year_max=partial_slicers.year_max,
     )
     species_options = query.option_values(grid_path, genus_slicers)["species"]
-    include_species, exclude_species = filter_mode("Species", species_options, controls)
-    show_year_comparison = controls.checkbox("Show year comparison", value=False)
-    show_filtered_rows = controls.checkbox("Show filtered rows", value=False)
+    include_species, exclude_species = filter_mode("Species", species_options, species_controls)
+    show_year_comparison = display_controls.checkbox("Show year comparison", value=False)
+    show_filtered_rows = display_controls.checkbox("Show filtered rows", value=False)
     slicers = query.SlicerState(
         include_families=partial_slicers.include_families,
         exclude_families=partial_slicers.exclude_families,
