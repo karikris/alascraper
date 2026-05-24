@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,8 +40,20 @@ def species_color(species: str | None) -> list[int]:
     return [80 + digest[0] % 150, 70 + digest[1] % 160, 90 + digest[2] % 140, 170]
 
 
-def add_colors(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{**row, "color": species_color(row.get("species"))} for row in rows]
+def point_radius(record_count: int | float | None) -> float:
+    count = max(float(record_count or 0), 1.0)
+    return math.sqrt(count) * 350
+
+
+def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            **row,
+            "color": species_color(row.get("species")),
+            "radius": point_radius(row.get("record_count")),
+        }
+        for row in rows
+    ]
 
 
 def filter_mode(prefix: str, values: list[str], st: Any) -> tuple[list[str], list[str]]:
@@ -97,12 +110,12 @@ def build_partial_slicer_state(options: dict[str, list[Any]], st: Any) -> query.
 
 
 def render_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
-    colored_rows = add_colors(rows)
+    map_rows = add_visual_fields(rows)
     layer = pdk.Layer(
         "ScatterplotLayer",
-        colored_rows,
+        map_rows,
         get_position="[lon_bin, lat_bin]",
-        get_radius="Math.sqrt(record_count) * 350",
+        get_radius="radius",
         get_fill_color="color",
         pickable=True,
         opacity=0.75,

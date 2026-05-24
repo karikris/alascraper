@@ -6,6 +6,7 @@ from pathlib import Path
 import polars as pl
 
 from scripts.visuals.spatial_heatmap_dashboard import build_spatial_bins as bins
+from scripts.visuals.spatial_heatmap_dashboard import dashboard
 from scripts.visuals.spatial_heatmap_dashboard import query
 
 
@@ -127,3 +128,12 @@ def test_year_summary_supports_year_comparison(tmp_path: Path) -> None:
         {"year": 2011, "record_count": 1},
         {"year": 2012, "record_count": 1},
     ]
+
+
+def test_dashboard_precomputes_deck_visual_fields() -> None:
+    rows = dashboard.add_visual_fields(
+        [{"species": "Alpha one", "record_count": 4, "lat_bin": -37.8, "lon_bin": 144.9}]
+    )
+
+    assert rows[0]["color"] == dashboard.species_color("Alpha one")
+    assert rows[0]["radius"] == 700
