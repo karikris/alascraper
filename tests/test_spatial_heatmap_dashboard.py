@@ -409,6 +409,30 @@ def test_dashboard_map_display_modes_include_piechart_composition() -> None:
     assert dashboard.PIECHART_COMPOSITION_MODE in dashboard.MAP_DISPLAY_MODES
 
 
+def test_dashboard_defaults_to_piechart_composition_mode() -> None:
+    assert dashboard.MAP_DISPLAY_MODES[0] == dashboard.PIECHART_COMPOSITION_MODE
+
+
+def test_dashboard_map_display_selector_uses_versioned_state_key() -> None:
+    class FakeSidebar:
+        def __init__(self) -> None:
+            self.key = None
+            self.index = None
+
+        def selectbox(self, *_args: object, **kwargs: object) -> str:
+            self.key = kwargs["key"]
+            self.index = kwargs["index"]
+            return dashboard.PIECHART_COMPOSITION_MODE
+
+    sidebar = FakeSidebar()
+
+    selected = dashboard.map_display_selector(sidebar)
+
+    assert selected == dashboard.PIECHART_COMPOSITION_MODE
+    assert sidebar.index == 0
+    assert sidebar.key == "map_display_mode_v2"
+
+
 def test_dashboard_title_is_butterfly_dashboard() -> None:
     assert dashboard.PAGE_TITLE == "Butterfly Dashboard"
 

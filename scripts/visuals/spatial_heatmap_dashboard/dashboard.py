@@ -39,7 +39,7 @@ MAP_HEIGHT_PX = 820
 SINGLE_COLOR_MODE = "Single-color bubbles"
 PIECHART_COMPOSITION_MODE = "Piechart composition markers"
 SHARE_HEATMAP_MODE = "Selected-category share heatmap"
-MAP_DISPLAY_MODES = [SINGLE_COLOR_MODE, PIECHART_COMPOSITION_MODE, SHARE_HEATMAP_MODE]
+MAP_DISPLAY_MODES = [PIECHART_COMPOSITION_MODE, SINGLE_COLOR_MODE, SHARE_HEATMAP_MODE]
 PIE_ICON_CANVAS_PX = 128
 PIE_ICON_MIN_SIZE_PX = 18
 PIE_ICON_MAX_SIZE_PX = 58
@@ -308,7 +308,7 @@ def color_lock_selector(st: Any) -> str | None:
 
 
 def map_display_selector(st: Any) -> str:
-    return st.selectbox("Map display", MAP_DISPLAY_MODES, index=0)
+    return st.selectbox("Map display", MAP_DISPLAY_MODES, index=0, key="map_display_mode_v2")
 
 
 def share_focus_selector(st: Any, options: list[dict[str, Any]]) -> str | None:
