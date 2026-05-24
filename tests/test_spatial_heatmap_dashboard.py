@@ -173,3 +173,33 @@ def test_query_color_dimension_follows_taxonomy_filter_specificity() -> None:
         query.color_dimension(query.SlicerState(include_species=["Alpha one"]))
         == "scientificName"
     )
+
+
+def test_state_selector_reads_explicit_session_state() -> None:
+    class FakeSidebar:
+        def radio(self, *_args: object, **_kwargs: object) -> str:
+            return "Include"
+
+        def multiselect(self, *_args: object, **_kwargs: object) -> list[str]:
+            return ["Victoria"]
+
+        def selectbox(self, *_args: object, **kwargs: object) -> str:
+            callback = kwargs.get("on_change")
+            if callback:
+                callback()
+            return "East coast"
+
+    session_state = {
+        "state_preset": "East coast",
+        "state_values": ["Victoria", "Unknown"],
+    }
+
+    include_states, exclude_states = dashboard.state_selector(
+        ["Victoria", "New South Wales", "Queensland"],
+        FakeSidebar(),
+        session_state,
+    )
+
+    assert include_states == ["Victoria"]
+    assert exclude_states == []
+    assert session_state["state_values"] == ["Victoria", "New South Wales", "Queensland"]

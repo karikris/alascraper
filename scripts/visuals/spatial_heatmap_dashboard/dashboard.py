@@ -79,15 +79,19 @@ def state_preset_values(preset: str, states: list[str]) -> list[str]:
     return []
 
 
-def state_selector(states: list[str], st: Any) -> tuple[list[str], list[str]]:
-    if "state_values" in st.session_state:
-        st.session_state["state_values"] = [
-            state for state in st.session_state["state_values"] if state in states
+def state_selector(
+    states: list[str],
+    st: Any,
+    session_state: Any,
+) -> tuple[list[str], list[str]]:
+    if "state_values" in session_state:
+        session_state["state_values"] = [
+            state for state in session_state["state_values"] if state in states
         ]
 
     def apply_state_preset() -> None:
-        preset = st.session_state.get("state_preset", "Custom")
-        st.session_state["state_values"] = state_preset_values(preset, states)
+        preset = session_state.get("state_preset", "Custom")
+        session_state["state_values"] = state_preset_values(preset, states)
 
     mode = st.radio("State mode", ["Include", "Exclude"], horizontal=True, key="state_mode")
     selected = st.multiselect("State/territory", states, key="state_values")
@@ -113,9 +117,13 @@ def active_year_bounds(
     return selected_range
 
 
-def build_partial_slicer_state(options: dict[str, list[Any]], st: Any) -> query.SlicerState:
+def build_partial_slicer_state(
+    options: dict[str, list[Any]],
+    st: Any,
+    session_state: Any,
+) -> query.SlicerState:
     include_families, exclude_families = filter_mode("Family", options["families"], st)
-    include_states, exclude_states = state_selector(options["states"], st)
+    include_states, exclude_states = state_selector(options["states"], st, session_state)
     years = [int(year) for year in options["years"] if year is not None]
     year_min = min(years) if years else None
     year_max = max(years) if years else None
@@ -221,7 +229,7 @@ def main() -> None:
 
     base_options = query.option_values(grid_path, query.SlicerState())
     map_point_limit = map_point_limit_selector(controls)
-    partial_slicers = build_partial_slicer_state(base_options, controls)
+    partial_slicers = build_partial_slicer_state(base_options, controls, st.session_state)
     genus_options = query.option_values(grid_path, partial_slicers)["genera"]
     include_genera, exclude_genera = filter_mode("Genus", genus_options, controls)
     genus_slicers = query.SlicerState(
