@@ -1,0 +1,183 @@
+#!/usr/bin/env python3.14
+"""Streamlit dashboard for butterfly spatial heatmap exploration."""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+from typing import Any
+
+from scripts.visuals.spatial_heatmap_dashboard import query
+
+
+DEFAULT_GRID_PATH = Path("datasets/insecta/lepidoptera/dashboard/butterfly_grid_bins.parquet")
+EAST_COAST_STATES = [
+    "Victoria",
+    "New South Wales",
+    "Australian Capital Territory",
+    "Queensland",
+]
+MAINLAND_STATES = [
+    "Australian Capital Territory",
+    "New South Wales",
+    "Northern Territory",
+    "Queensland",
+    "South Australia",
+    "Victoria",
+    "Western Australia",
+]
+CARTO_POSITRON_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+
+
+def species_color(species: str | None) -> list[int]:
+    text = species or "not supplied"
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    return [80 + digest[0] % 150, 70 + digest[1] % 160, 90 + digest[2] % 140, 170]
+
+
+def add_colors(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{**row, "color": species_color(row.get("species"))} for row in rows]
+
+
+def filter_mode(prefix: str, values: list[str], st: Any) -> tuple[list[str], list[str]]:
+    mode = st.radio(
+        f"{prefix} mode",
+        ["Include", "Exclude"],
+        horizontal=True,
+        key=f"{prefix.lower()}_mode",
+    )
+    selected = st.multiselect(prefix, values, key=f"{prefix.lower()}_values")
+    return (selected, []) if mode == "Include" else ([], selected)
+
+
+def state_selector(states: list[str], st: Any) -> tuple[list[str], list[str]]:
+    preset = st.selectbox(
+        "State preset",
+        ["Custom", "East coast", "Mainland", "All"],
+        index=0,
+    )
+    default_values: list[str] = []
+    if preset == "East coast":
+        default_values = [state for state in EAST_COAST_STATES if state in states]
+    elif preset == "Mainland":
+        default_values = [state for state in MAINLAND_STATES if state in states]
+    elif preset == "All":
+        default_values = states
+
+    mode = st.radio("State mode", ["Include", "Exclude"], horizontal=True)
+    selected = st.multiselect("State/territory", states, default=default_values)
+    return (selected, []) if mode == "Include" else ([], selected)
+
+
+def build_partial_slicer_state(options: dict[str, list[Any]], st: Any) -> query.SlicerState:
+    include_families, exclude_families = filter_mode("Family", options["families"], st)
+    include_states, exclude_states = state_selector(options["states"], st)
+    years = [int(year) for year in options["years"] if year is not None]
+    year_min = min(years) if years else None
+    year_max = max(years) if years else None
+    selected_range = st.slider(
+        "Year range",
+        min_value=year_min or 0,
+        max_value=year_max or 0,
+        value=(year_min or 0, year_max or 0),
+        disabled=not years,
+    )
+    return query.SlicerState(
+        include_families=include_families,
+        exclude_families=exclude_families,
+        include_states=include_states,
+        exclude_states=exclude_states,
+        year_min=selected_range[0] if years else None,
+        year_max=selected_range[1] if years else None,
+    )
+
+
+def render_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
+    colored_rows = add_colors(rows)
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        colored_rows,
+        get_position="[lon_bin, lat_bin]",
+        get_radius="Math.sqrt(record_count) * 350",
+        get_fill_color="color",
+        pickable=True,
+        opacity=0.75,
+    )
+    deck = pdk.Deck(
+        map_style=CARTO_POSITRON_STYLE,
+        initial_view_state=pdk.ViewState(
+            latitude=-25.3,
+            longitude=134.5,
+            zoom=3.2,
+            pitch=0,
+        ),
+        layers=[layer],
+        tooltip={
+            "text": (
+                "{species}\n"
+                "{family}\n"
+                "{stateProvince}, {year}\n"
+                "Records: {record_count}"
+            )
+        },
+    )
+    st.pydeck_chart(deck, use_container_width=True)
+
+
+def main() -> None:
+    try:
+        import pydeck as pdk
+        import streamlit as st
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "Install dashboard dependencies with: "
+            "pip install streamlit pydeck"
+        ) from exc
+
+    st.set_page_config(page_title="Butterfly Spatial Heatmap", layout="wide")
+    st.title("Butterfly Spatial Heatmap")
+    grid_path = Path(
+        st.sidebar.text_input("Grid bins parquet", value=str(DEFAULT_GRID_PATH))
+    )
+    if not grid_path.exists():
+        st.error(f"Missing grid bins: {grid_path}")
+        st.stop()
+
+    base_options = query.option_values(grid_path, query.SlicerState())
+    partial_slicers = build_partial_slicer_state(base_options, st.sidebar)
+    species_options = query.option_values(grid_path, partial_slicers)["species"]
+    include_species, exclude_species = filter_mode("Species", species_options, st.sidebar)
+    slicers = query.SlicerState(
+        include_families=partial_slicers.include_families,
+        exclude_families=partial_slicers.exclude_families,
+        include_species=include_species,
+        exclude_species=exclude_species,
+        include_states=partial_slicers.include_states,
+        exclude_states=partial_slicers.exclude_states,
+        year_min=partial_slicers.year_min,
+        year_max=partial_slicers.year_max,
+    )
+    filtered_options = query.option_values(grid_path, slicers)
+    st.sidebar.caption(
+        f"Families: {len(filtered_options['families'])} | "
+        f"Species: {len(filtered_options['species'])} | "
+        f"States: {len(filtered_options['states'])}"
+    )
+
+    rows = query.query_grid_bins(grid_path, slicers)
+    years = query.year_summary(grid_path, slicers)
+    total_records = sum(int(row["record_count"]) for row in rows)
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Map bins", f"{len(rows):,}")
+    col_b.metric("Mapped records", f"{total_records:,}")
+    col_c.metric("Years", f"{len(years):,}")
+
+    render_map(rows, st, pdk)
+    st.subheader("Year comparison")
+    st.bar_chart(years, x="year", y="record_count")
+    with st.expander("Filtered map rows"):
+        st.dataframe(rows, use_container_width=True)
+
+
+if __name__ == "__main__":
+    main()

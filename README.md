@@ -277,6 +277,34 @@ datasets/insecta/lepidoptera/
     └── butterflies_categorical_top_values.csv
 ```
 
+Complete nullable taxonomy fields before dashboard work. The `species` column is
+the canonical species-level slicer; `scientificName` and `taxonConceptID` remain
+species/subspecies detail fields.
+
+```bash
+.venv/bin/python scripts/cleaning/complete_taxonomy_fields.py --no-external-lookup
+```
+
+Omit `--no-external-lookup` to allow guarded GBIF species-match fallback for
+unresolved names. The script writes `butterflies_cleaned.parquet`, unresolved
+taxonomy rows, and month value counts.
+
+Build rounded-coordinate spatial bins for the dashboard:
+
+```bash
+.venv/bin/python scripts/visuals/spatial_heatmap_dashboard/build_spatial_bins.py
+```
+
+Run the local dashboard after installing requirements:
+
+```bash
+.venv/bin/streamlit run scripts/visuals/spatial_heatmap_dashboard/dashboard.py
+```
+
+The dashboard uses central cross-filtering slicers for family, species, year
+range, and state/territory include/exclude selections. The default map source is
+the pre-aggregated grid Parquet, not the raw occurrence rows.
+
 ## Privacy Defaults
 
 `INCLUDE_USER_DATA_FIELDS = False` omits observer/user and source-linked fields.
