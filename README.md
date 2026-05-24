@@ -254,7 +254,6 @@ Per-family report outputs:
 datasets/<class>/<order>/<family>/quality_reports/
 ├── <family>_quality_summary.json
 ├── <family>_column_profile.csv
-├── <family>_numeric_stats.csv
 ├── <family>_categorical_top_values.csv
 └── family_notes.md                  # only when notes are entered
 ```

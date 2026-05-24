@@ -118,14 +118,10 @@ def test_profiles_nulls_distincts_stats_species_counts_and_quality_flags(
     assert species_column["null_count"] == 1
     assert species_column["distinct_count"] == 3
 
-    latitude_stats = next(
-        row for row in report.numeric_stats if row["column"] == "decimalLatitude"
-    )
-    assert latitude_stats["min"] == -38.0
-    assert latitude_stats["max"] == 95.0
 
-
-def test_writes_reports_and_appends_guided_notes(tmp_path: Path) -> None:
+def test_writes_reports_without_numeric_stats_and_appends_guided_notes(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "datasets"
     path = write_family_parquet(root)
     match = profiler.FamilyParquet(
@@ -142,8 +138,8 @@ def test_writes_reports_and_appends_guided_notes(tmp_path: Path) -> None:
     assert summary["family_key"] == "psittacidae"
     assert summary["summary"]["row_count"] == 4
     assert outputs.column_profile_csv.exists()
-    assert outputs.numeric_stats_csv.exists()
     assert outputs.categorical_top_values_csv.exists()
+    assert not (outputs.summary_json.parent / "psittacidae_numeric_stats.csv").exists()
     assert "Needs coordinate review" in outputs.notes_path.read_text(encoding="utf-8")
 
     rows = read_csv_rows(outputs.column_profile_csv)

@@ -44,7 +44,6 @@ class FamilyParquet:
 class QualityReport:
     summary: dict[str, Any]
     column_profile: list[dict[str, Any]]
-    numeric_stats: list[dict[str, Any]]
     categorical_top_values: list[dict[str, Any]]
     species_counts: dict[str, int]
     quality_flags: list[str]
@@ -54,7 +53,6 @@ class QualityReport:
 class ReportOutputs:
     summary_json: Path
     column_profile_csv: Path
-    numeric_stats_csv: Path
     categorical_top_values_csv: Path
     notes_path: Path
 
@@ -196,43 +194,6 @@ def build_column_profile(
                 "non_null_count": non_null_count,
                 "distinct_count": distinct_count,
                 "flags": "|".join(flags),
-            }
-        )
-
-    return rows
-
-
-def collect_numeric_stats(
-    lazy_frame: pl.LazyFrame,
-    schema: dict[str, pl.DataType],
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-
-    for column, dtype in schema.items():
-        if not dtype.is_numeric():
-            continue
-
-        stats = lazy_frame.select(
-            [
-                pl.col(column).count().alias("non_null_count"),
-                pl.col(column).min().alias("min"),
-                pl.col(column).max().alias("max"),
-                pl.col(column).mean().alias("mean"),
-                pl.col(column).median().alias("median"),
-                pl.col(column).std().alias("std"),
-            ]
-        ).collect()
-        row = stats.row(0, named=True)
-        rows.append(
-            {
-                "column": column,
-                "dtype": str(dtype),
-                "non_null_count": int(row["non_null_count"] or 0),
-                "min": row["min"],
-                "max": row["max"],
-                "mean": row["mean"],
-                "median": row["median"],
-                "std": row["std"],
             }
         )
 
@@ -395,7 +356,6 @@ def profile_parquet(path: Path) -> QualityReport:
         null_counts=null_counts,
         distinct_counts=distinct_counts,
     )
-    numeric_stats = collect_numeric_stats(lazy_frame, schema)
     categorical_top_values = collect_categorical_top_values(
         lazy_frame,
         schema,
@@ -427,7 +387,6 @@ def profile_parquet(path: Path) -> QualityReport:
     return QualityReport(
         summary=summary,
         column_profile=column_profile,
-        numeric_stats=numeric_stats,
         categorical_top_values=categorical_top_values,
         species_counts=species_counts,
         quality_flags=quality_flags,
@@ -455,7 +414,6 @@ def write_report_files(
     outputs = ReportOutputs(
         summary_json=output_dir / f"{prefix}_quality_summary.json",
         column_profile_csv=output_dir / f"{prefix}_column_profile.csv",
-        numeric_stats_csv=output_dir / f"{prefix}_numeric_stats.csv",
         categorical_top_values_csv=output_dir / f"{prefix}_categorical_top_values.csv",
         notes_path=output_dir / notes_filename,
     )
@@ -486,11 +444,6 @@ def write_report_files(
             "distinct_count",
             "flags",
         ],
-    )
-    write_csv_rows(
-        outputs.numeric_stats_csv,
-        report.numeric_stats,
-        ["column", "dtype", "non_null_count", "min", "max", "mean", "median", "std"],
     )
     write_csv_rows(
         outputs.categorical_top_values_csv,
@@ -537,7 +490,6 @@ def print_family_summary(
         print("Flags: " + ", ".join(report.quality_flags))
     print(f"Summary JSON: {outputs.summary_json}")
     print(f"Column profile CSV: {outputs.column_profile_csv}")
-    print(f"Numeric stats CSV: {outputs.numeric_stats_csv}")
     print(f"Categorical top values CSV: {outputs.categorical_top_values_csv}")
 
 
