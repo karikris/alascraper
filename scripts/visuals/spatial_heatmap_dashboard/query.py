@@ -50,6 +50,12 @@ GROUP_COLUMNS_BY_COLOR_DIMENSION = {
     ],
 }
 DISPLAY_COLUMNS = ["family", "genus", "species", "scientificName", "stateProvince"]
+SHARE_DISPLAY_COLUMNS_BY_COLOR_DIMENSION = {
+    "family": ["family", "stateProvince"],
+    "genus": ["family", "genus", "stateProvince"],
+    "species": ["family", "genus", "species", "stateProvince"],
+    "scientificName": DISPLAY_COLUMNS,
+}
 
 
 def sql_string(value: str | Path) -> str:
@@ -106,6 +112,24 @@ def grouped_select_columns(group_columns: list[str]) -> str:
     return ",\n                ".join(selected)
 
 
+def share_display_select_columns(display_columns: list[str]) -> str:
+    selected: list[str] = []
+    for column in DISPLAY_COLUMNS:
+        if column not in display_columns:
+            selected.append(f"NULL AS {column}")
+            continue
+        selected.append(
+            f"""
+                CASE
+                    WHEN COUNT(DISTINCT {column}) = 1 THEN MIN(CAST({column} AS VARCHAR))
+                    WHEN COUNT(DISTINCT {column}) > 1 THEN 'multiple'
+                    ELSE NULL
+                END AS {column}
+            """.strip()
+        )
+    return ",\n                ".join(selected)
+
+
 def query_grid_bins(
     grid_path: Path,
     filters: SlicerState,
@@ -141,6 +165,152 @@ def query_grid_bins(
         result = con.execute(query)
         columns = [item[0] for item in result.description]
         return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+    finally:
+        con.close()
+
+
+def color_value_options(
+    grid_path: Path,
+    filters: SlicerState,
+    *,
+    locked_color_dimension: str | None = None,
+    limit: int = 5_000,
+) -> list[dict[str, Any]]:
+    con = duckdb.connect(":memory:")
+    try:
+        color_by = color_dimension(filters, locked_color_dimension)
+        result = con.execute(
+            f"""
+            SELECT
+                COALESCE(CAST({color_by} AS VARCHAR), 'not supplied') AS value,
+                SUM(record_count) AS record_count
+            FROM read_parquet({sql_string(Path(grid_path).as_posix())})
+            {where_sql(filters)}
+            GROUP BY value
+            ORDER BY record_count DESC, value
+            LIMIT {int(limit)}
+            """
+        )
+        columns = [item[0] for item in result.description]
+        return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+    finally:
+        con.close()
+
+
+def query_share_heatmap_bins(
+    grid_path: Path,
+    filters: SlicerState,
+    *,
+    focus_value: str,
+    limit: int = 250_000,
+    locked_color_dimension: str | None = None,
+    top_competitors: int = 5,
+) -> list[dict[str, Any]]:
+    if not focus_value:
+        return []
+
+    con = duckdb.connect(":memory:")
+    try:
+        color_by = color_dimension(filters, locked_color_dimension)
+        source = f"read_parquet({sql_string(Path(grid_path).as_posix())})"
+        filtered = f"""
+            SELECT
+                *,
+                COALESCE(CAST({color_by} AS VARCHAR), 'not supplied') AS active_color_value
+            FROM {source}
+            {where_sql(filters)}
+        """
+        focus_clause = f"active_color_value = {sql_string(focus_value)}"
+        display_columns = SHARE_DISPLAY_COLUMNS_BY_COLOR_DIMENSION[color_by]
+        result = con.execute(
+            f"""
+            WITH filtered AS ({filtered}),
+            cell_totals AS (
+                SELECT lat_bin, lon_bin, SUM(record_count) AS total_cell_records
+                FROM filtered
+                GROUP BY lat_bin, lon_bin
+            ),
+            focus_counts AS (
+                SELECT
+                    lat_bin,
+                    lon_bin,
+                    {share_display_select_columns(display_columns)},
+                    SUM(record_count) AS record_count
+                FROM filtered
+                WHERE {focus_clause}
+                GROUP BY lat_bin, lon_bin
+            )
+            SELECT
+                focus_counts.lat_bin,
+                focus_counts.lon_bin,
+                focus_counts.family,
+                focus_counts.genus,
+                focus_counts.species,
+                focus_counts.scientificName,
+                focus_counts.stateProvince,
+                focus_counts.record_count,
+                cell_totals.total_cell_records,
+                focus_counts.record_count::DOUBLE / cell_totals.total_cell_records AS share,
+                {sql_string(color_by)} AS color_level,
+                {sql_string(focus_value)} AS color_value
+            FROM focus_counts
+            INNER JOIN cell_totals USING (lat_bin, lon_bin)
+            ORDER BY focus_counts.record_count DESC
+            LIMIT {int(limit)}
+            """
+        )
+        columns = [item[0] for item in result.description]
+        rows = [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+        if not rows:
+            return []
+
+        composition_result = con.execute(
+            f"""
+            WITH filtered AS ({filtered}),
+            focus_cells AS (
+                SELECT DISTINCT lat_bin, lon_bin
+                FROM filtered
+                WHERE {focus_clause}
+            ),
+            category_counts AS (
+                SELECT
+                    filtered.lat_bin,
+                    filtered.lon_bin,
+                    filtered.active_color_value AS color_value,
+                    SUM(filtered.record_count) AS record_count
+                FROM filtered
+                INNER JOIN focus_cells USING (lat_bin, lon_bin)
+                GROUP BY filtered.lat_bin, filtered.lon_bin, filtered.active_color_value
+            ),
+            ranked AS (
+                SELECT
+                    lat_bin,
+                    lon_bin,
+                    color_value,
+                    record_count,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY lat_bin, lon_bin
+                        ORDER BY record_count DESC, color_value
+                    ) AS rank
+                FROM category_counts
+            )
+            SELECT lat_bin, lon_bin, color_value, record_count
+            FROM ranked
+            WHERE rank <= {int(top_competitors)}
+            ORDER BY lat_bin, lon_bin, rank
+            """
+        ).fetchall()
+        composition: dict[tuple[Any, Any], list[str]] = {}
+        for lat_bin, lon_bin, color_value, record_count in composition_result:
+            composition.setdefault((lat_bin, lon_bin), []).append(
+                f"{color_value}: {int(record_count):,}"
+            )
+
+        for row in rows:
+            row["composition_text"] = "\n".join(
+                composition.get((row["lat_bin"], row["lon_bin"]), [])
+            )
+        return rows
     finally:
         con.close()
 

@@ -28,6 +28,27 @@ def write_dashboard_fixture(path: Path) -> None:
     ).write_parquet(path)
 
 
+def write_share_fixture(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "lat_bin": [-37.8, -37.8, -37.8, -33.9],
+            "lon_bin": [145.0, 145.0, 145.0, 151.2],
+            "family": ["A", "B", "A", "A"],
+            "genus": ["Alpha", "Beta", "Alpha", "Alpha"],
+            "species": ["Alpha one", "Beta one", "Alpha two", "Alpha one"],
+            "scientificName": ["Alpha one", "Beta one", "Alpha two", "Alpha one"],
+            "stateProvince": ["Victoria", "Victoria", "Victoria", "New South Wales"],
+            "year": [2010, 2010, 2011, 2011],
+            "record_count": [6, 3, 1, 5],
+            "distinct_scientific_names": [1, 1, 1, 1],
+            "distinct_taxon_concepts": [1, 1, 1, 1],
+            "min_year": [2010, 2010, 2011, 2011],
+            "max_year": [2010, 2010, 2011, 2011],
+        }
+    ).write_parquet(path)
+
+
 def test_build_grid_bins_excludes_null_coordinates_and_aggregates(
     tmp_path: Path,
 ) -> None:
@@ -98,6 +119,69 @@ def test_query_grid_bins_applies_include_exclude_and_year_range(
     assert query.mapped_record_count(outputs.grid_bins, filters) == 2
 
 
+def test_color_value_options_returns_active_color_values_by_count(tmp_path: Path) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_share_fixture(grid)
+
+    options = query.color_value_options(grid, query.SlicerState())
+
+    assert options == [
+        {"value": "A", "record_count": 12},
+        {"value": "B", "record_count": 3},
+    ]
+
+
+def test_share_heatmap_counts_focus_share_and_top_composition(tmp_path: Path) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_share_fixture(grid)
+    filters = query.SlicerState(include_states=["Victoria"])
+
+    rows = query.query_share_heatmap_bins(
+        grid,
+        filters,
+        focus_value="A",
+        locked_color_dimension="family",
+    )
+
+    assert rows == [
+        {
+            "lat_bin": -37.8,
+            "lon_bin": 145.0,
+            "family": "A",
+            "genus": None,
+            "species": None,
+            "scientificName": None,
+            "stateProvince": "Victoria",
+            "record_count": 7,
+            "total_cell_records": 10,
+            "share": 0.7,
+            "color_level": "family",
+            "color_value": "A",
+            "composition_text": "A: 7\nB: 3",
+        }
+    ]
+
+
+def test_share_heatmap_state_and_year_filters_do_not_change_color_level(
+    tmp_path: Path,
+) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_share_fixture(grid)
+    filters = query.SlicerState(
+        include_families=["A"],
+        include_states=["Victoria"],
+        year_min=2011,
+        year_max=2011,
+    )
+
+    rows = query.query_share_heatmap_bins(grid, filters, focus_value="Alpha")
+
+    assert rows[0]["color_level"] == "genus"
+    assert rows[0]["record_count"] == 1
+    assert rows[0]["total_cell_records"] == 1
+    assert rows[0]["share"] == 1.0
+
+
 def test_cross_filter_options_respect_current_slicer_state(tmp_path: Path) -> None:
     source = tmp_path / "butterflies_cleaned.parquet"
     out_dir = tmp_path / "dashboard"
@@ -156,6 +240,33 @@ def test_dashboard_precomputes_deck_visual_fields() -> None:
 
     assert rows[0]["color"] == dashboard.stable_color("Alpha")
     assert rows[0]["radius"] == 27_000
+
+
+def test_dashboard_precomputes_share_heatmap_visual_fields() -> None:
+    rows = dashboard.add_share_heatmap_visual_fields(
+        [
+            {
+                "color_level": "family",
+                "color_value": "Nymphalidae",
+                "record_count": 4,
+                "share": 0.25,
+            },
+            {
+                "color_level": "family",
+                "color_value": "Nymphalidae",
+                "record_count": 4,
+                "share": 1.0,
+            },
+        ]
+    )
+
+    assert rows[0]["radius"] == 27_000
+    assert rows[0]["color"][:3] == dashboard.FAMILY_COLORS["Nymphalidae"][:3]
+    assert rows[0]["color"][3] < rows[1]["color"][3]
+
+
+def test_dashboard_title_is_butterfly_dashboard() -> None:
+    assert dashboard.PAGE_TITLE == "Butterfly Dashboard"
 
 
 def test_dashboard_uses_fixed_family_palette() -> None:

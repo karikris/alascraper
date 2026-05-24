@@ -16,6 +16,7 @@ from scripts.visuals.spatial_heatmap_dashboard import query
 
 
 DEFAULT_GRID_PATH = Path("datasets/insecta/lepidoptera/dashboard/butterfly_grid_bins.parquet")
+PAGE_TITLE = "Butterfly Dashboard"
 EAST_COAST_STATES = [
     "Victoria",
     "New South Wales",
@@ -34,6 +35,9 @@ MAINLAND_STATES = [
 CARTO_POSITRON_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 DEFAULT_MAP_POINT_LIMIT = 250_000
 MAP_HEIGHT_PX = 820
+SINGLE_COLOR_MODE = "Single-color bubbles"
+SHARE_HEATMAP_MODE = "Selected-category share heatmap"
+MAP_DISPLAY_MODES = [SINGLE_COLOR_MODE, SHARE_HEATMAP_MODE]
 COLOR_LEVEL_LABELS = {
     "Family": "family",
     "Genus": "genus",
@@ -76,6 +80,27 @@ def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+def share_alpha(share: int | float | None) -> int:
+    value = max(0.0, min(float(share or 0), 1.0))
+    return int(55 + value * 175)
+
+
+def add_share_heatmap_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    visual_rows = []
+    for row in rows:
+        color = map_color(row.get("color_level"), row.get("color_value")).copy()
+        color[3] = share_alpha(row.get("share"))
+        visual_rows.append(
+            {
+                **row,
+                "color": color,
+                "radius": point_radius(row.get("record_count")),
+                "share_percent": f"{float(row.get('share') or 0) * 100:.1f}%",
+            }
+        )
+    return visual_rows
 
 
 def filter_mode(prefix: str, values: list[str], st: Any) -> tuple[list[str], list[str]]:
@@ -190,6 +215,22 @@ def color_lock_selector(st: Any) -> str | None:
     return COLOR_LEVEL_LABELS[selected_label]
 
 
+def map_display_selector(st: Any) -> str:
+    return st.selectbox("Map display", MAP_DISPLAY_MODES, index=0)
+
+
+def share_focus_selector(st: Any, options: list[dict[str, Any]]) -> str | None:
+    if not options:
+        st.info("No focus values available for the active color level.")
+        return None
+    labels = {
+        f"{option['value']} ({int(option['record_count']):,})": str(option["value"])
+        for option in options
+    }
+    selected = st.selectbox("Share focus", list(labels))
+    return labels[selected]
+
+
 def render_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
     map_rows = add_visual_fields(rows)
     layer = pdk.Layer(
@@ -226,6 +267,40 @@ def render_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
     st.pydeck_chart(deck, width="stretch", height=MAP_HEIGHT_PX)
 
 
+def render_share_heatmap(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
+    map_rows = add_share_heatmap_visual_fields(rows)
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        map_rows,
+        get_position="[lon_bin, lat_bin]",
+        get_radius="radius",
+        get_fill_color="color",
+        pickable=True,
+        opacity=0.85,
+    )
+    deck = pdk.Deck(
+        map_style=CARTO_POSITRON_STYLE,
+        initial_view_state=pdk.ViewState(
+            latitude=-25.3,
+            longitude=134.5,
+            zoom=3.2,
+            pitch=0,
+        ),
+        layers=[layer],
+        tooltip={
+            "text": (
+                "{color_level}: {color_value}\n"
+                "Focus records: {record_count}\n"
+                "Total records here: {total_cell_records}\n"
+                "Share: {share_percent}\n"
+                "State: {stateProvince}\n"
+                "Top values:\n{composition_text}"
+            )
+        },
+    )
+    st.pydeck_chart(deck, width="stretch", height=MAP_HEIGHT_PX)
+
+
 def main() -> None:
     try:
         import pydeck as pdk
@@ -236,7 +311,7 @@ def main() -> None:
             "pip install streamlit pydeck"
         ) from exc
 
-    st.set_page_config(page_title="Butterfly Spatial Heatmap", layout="wide")
+    st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     st.markdown(
         """
         <style>
@@ -251,7 +326,7 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.title("Butterfly Spatial Heatmap")
+    st.title(PAGE_TITLE)
     max_controls = st.sidebar.container()
     family_controls = st.sidebar.container()
     genus_controls = st.sidebar.container()
@@ -269,6 +344,7 @@ def main() -> None:
     base_options = query.option_values(grid_path, query.SlicerState())
     map_point_limit = map_point_limit_selector(max_controls)
     locked_color_dimension = color_lock_selector(max_controls)
+    map_display_mode = map_display_selector(max_controls)
     partial_slicers = build_partial_slicer_state(
         base_options,
         family_controls,
@@ -313,26 +389,57 @@ def main() -> None:
         f"States: {len(filtered_options['states'])}"
     )
 
-    rows = query.query_grid_bins(
-        grid_path,
-        slicers,
-        limit=map_point_limit,
-        locked_color_dimension=locked_color_dimension,
-    )
+    focus_value = None
+    if map_display_mode == SHARE_HEATMAP_MODE:
+        focus_options = query.color_value_options(
+            grid_path,
+            slicers,
+            locked_color_dimension=locked_color_dimension,
+        )
+        focus_value = share_focus_selector(max_controls, focus_options)
+
+    if map_display_mode == SHARE_HEATMAP_MODE and focus_value:
+        rows = query.query_share_heatmap_bins(
+            grid_path,
+            slicers,
+            focus_value=focus_value,
+            limit=map_point_limit,
+            locked_color_dimension=locked_color_dimension,
+        )
+    elif map_display_mode == SHARE_HEATMAP_MODE:
+        rows = []
+    else:
+        rows = query.query_grid_bins(
+            grid_path,
+            slicers,
+            limit=map_point_limit,
+            locked_color_dimension=locked_color_dimension,
+        )
     years = query.year_summary(grid_path, slicers)
     matching_records = query.mapped_record_count(grid_path, slicers)
     total_records = sum(int(row["record_count"]) for row in rows)
     summary.metric("Map bins", f"{len(rows):,}")
-    summary.metric("Visible records", f"{total_records:,}")
+    if map_display_mode == SHARE_HEATMAP_MODE:
+        summary.metric("Focused records", f"{total_records:,}")
+    else:
+        summary.metric("Visible records", f"{total_records:,}")
     summary.metric("Matching records", f"{matching_records:,}")
     summary.metric("Years", f"{len(years):,}")
-    if total_records < matching_records:
+    if map_display_mode == SHARE_HEATMAP_MODE and len(rows) >= map_point_limit:
+        summary.warning(
+            "Map point cap may be hiding focused map points. "
+            "Increase Max map points or narrow the slicers."
+        )
+    elif map_display_mode != SHARE_HEATMAP_MODE and total_records < matching_records:
         summary.warning(
             f"Map point cap is hiding {matching_records - total_records:,} matching records. "
             "Increase Max map points or narrow the slicers."
         )
 
-    render_map(rows, st, pdk)
+    if map_display_mode == SHARE_HEATMAP_MODE:
+        render_share_heatmap(rows, st, pdk)
+    else:
+        render_map(rows, st, pdk)
     if show_year_comparison:
         st.subheader("Year comparison")
         st.bar_chart(years, x="year", y="record_count")
