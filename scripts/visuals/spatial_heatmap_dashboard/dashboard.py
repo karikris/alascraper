@@ -34,6 +34,12 @@ MAINLAND_STATES = [
 CARTO_POSITRON_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 DEFAULT_MAP_POINT_LIMIT = 250_000
 MAP_HEIGHT_PX = 820
+COLOR_LEVEL_LABELS = {
+    "Family": "family",
+    "Genus": "genus",
+    "Species": "species",
+    "Scientific name": "scientificName",
+}
 FAMILY_COLORS = {
     "Hesperiidae": [220, 38, 38, 190],
     "Lycaenidae": [22, 163, 74, 190],
@@ -173,6 +179,17 @@ def map_point_limit_selector(st: Any) -> int:
     )
 
 
+def color_lock_selector(st: Any) -> str | None:
+    if not st.checkbox("Lock color level", value=False):
+        return None
+    selected_label = st.selectbox(
+        "Color dots by",
+        list(COLOR_LEVEL_LABELS),
+        index=1,
+    )
+    return COLOR_LEVEL_LABELS[selected_label]
+
+
 def render_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
     map_rows = add_visual_fields(rows)
     layer = pdk.Layer(
@@ -251,6 +268,7 @@ def main() -> None:
 
     base_options = query.option_values(grid_path, query.SlicerState())
     map_point_limit = map_point_limit_selector(max_controls)
+    locked_color_dimension = color_lock_selector(max_controls)
     partial_slicers = build_partial_slicer_state(
         base_options,
         family_controls,
@@ -295,7 +313,12 @@ def main() -> None:
         f"States: {len(filtered_options['states'])}"
     )
 
-    rows = query.query_grid_bins(grid_path, slicers, limit=map_point_limit)
+    rows = query.query_grid_bins(
+        grid_path,
+        slicers,
+        limit=map_point_limit,
+        locked_color_dimension=locked_color_dimension,
+    )
     years = query.year_summary(grid_path, slicers)
     matching_records = query.mapped_record_count(grid_path, slicers)
     total_records = sum(int(row["record_count"]) for row in rows)

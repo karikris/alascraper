@@ -29,6 +29,7 @@ FILTER_COLUMNS = {
     "species": ("include_species", "exclude_species"),
     "stateProvince": ("include_states", "exclude_states"),
 }
+COLOR_DIMENSIONS = ("family", "genus", "species", "scientificName")
 TAXONOMY_FILTERS = (
     ("species", "include_species", "exclude_species", "scientificName"),
     ("genus", "include_genera", "exclude_genera", "species"),
@@ -86,7 +87,12 @@ def where_sql(filters: SlicerState, *, skip_column: str | None = None) -> str:
     return "WHERE " + " AND ".join(clauses) if clauses else ""
 
 
-def color_dimension(filters: SlicerState) -> str:
+def color_dimension(
+    filters: SlicerState,
+    locked_color_dimension: str | None = None,
+) -> str:
+    if locked_color_dimension in COLOR_DIMENSIONS:
+        return locked_color_dimension
     for _, include_attr, exclude_attr, dimension in TAXONOMY_FILTERS:
         if getattr(filters, include_attr) or getattr(filters, exclude_attr):
             return dimension
@@ -105,10 +111,11 @@ def query_grid_bins(
     filters: SlicerState,
     *,
     limit: int = 250_000,
+    locked_color_dimension: str | None = None,
 ) -> list[dict[str, Any]]:
     con = duckdb.connect(":memory:")
     try:
-        color_by = color_dimension(filters)
+        color_by = color_dimension(filters, locked_color_dimension)
         group_columns = GROUP_COLUMNS_BY_COLOR_DIMENSION[color_by]
         group_sql = ", ".join(group_columns)
         query = f"""

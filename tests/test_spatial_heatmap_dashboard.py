@@ -184,6 +184,75 @@ def test_query_color_dimension_follows_taxonomy_filter_specificity() -> None:
     )
 
 
+def test_query_color_dimension_can_be_locked() -> None:
+    filters = query.SlicerState(include_species=["Alpha one"])
+
+    assert query.color_dimension(filters, locked_color_dimension="family") == "family"
+    assert query.color_dimension(filters, locked_color_dimension="genus") == "genus"
+    assert query.color_dimension(filters, locked_color_dimension="species") == "species"
+    assert (
+        query.color_dimension(filters, locked_color_dimension="scientificName")
+        == "scientificName"
+    )
+    assert query.color_dimension(filters, locked_color_dimension="unknown") == "scientificName"
+
+
+def test_query_grid_bins_uses_locked_color_dimension(tmp_path: Path) -> None:
+    source = tmp_path / "butterflies_cleaned.parquet"
+    out_dir = tmp_path / "dashboard"
+    write_dashboard_fixture(source)
+    outputs = bins.build_spatial_bins(
+        source_path=source,
+        output_dir=out_dir,
+        grid_decimals=1,
+        h3_resolution=None,
+    )
+    filters = query.SlicerState(include_genera=["Alpha"])
+
+    rows = query.query_grid_bins(
+        outputs.grid_bins,
+        filters,
+        locked_color_dimension="genus",
+    )
+
+    assert sorted(rows, key=lambda row: row["year_range"]) == [
+        {
+            "lat_bin": -37.8,
+            "lon_bin": 145.0,
+            "family": "A",
+            "genus": "Alpha",
+            "species": None,
+            "scientificName": None,
+            "stateProvince": "Victoria",
+            "record_count": 1,
+            "distinct_scientific_names": 1,
+            "distinct_taxon_concepts": 1,
+            "min_year": 2010,
+            "max_year": 2010,
+            "year_range": "2010",
+            "color_level": "genus",
+            "color_value": "Alpha",
+        },
+        {
+            "lat_bin": -33.9,
+            "lon_bin": 151.2,
+            "family": "A",
+            "genus": "Alpha",
+            "species": None,
+            "scientificName": None,
+            "stateProvince": "New South Wales",
+            "record_count": 1,
+            "distinct_scientific_names": 1,
+            "distinct_taxon_concepts": 1,
+            "min_year": 2011,
+            "max_year": 2011,
+            "year_range": "2011",
+            "color_level": "genus",
+            "color_value": "Alpha",
+        },
+    ]
+
+
 def test_state_selector_reads_explicit_session_state() -> None:
     class FakeSidebar:
         def radio(self, *_args: object, **_kwargs: object) -> str:
