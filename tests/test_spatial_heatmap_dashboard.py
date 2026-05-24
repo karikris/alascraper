@@ -16,6 +16,7 @@ def write_dashboard_fixture(path: Path) -> None:
         {
             "uuid": ["1", "2", "3", "4", "5"],
             "family": ["A", "A", "B", "C", "C"],
+            "genus": ["Alpha", "Alpha", "Beta", "Gamma", None],
             "species": ["Alpha one", "Alpha one", "Beta one", "Gamma one", None],
             "scientificName": ["Alpha one", "Alpha one", "Beta one", "Gamma one", "Unknown"],
             "taxonConceptID": ["t1", "t1", "t2", "t3", None],
@@ -49,6 +50,7 @@ def test_build_grid_bins_excludes_null_coordinates_and_aggregates(
         "lat_bin",
         "lon_bin",
         "family",
+        "genus",
         "species",
         "year",
         "stateProvince",
@@ -59,6 +61,7 @@ def test_build_grid_bins_excludes_null_coordinates_and_aggregates(
     assert grid.filter(pl.col("family") == "A")["record_count"].sum() == 2
     assert dimensions["row_count"] == 5
     assert dimensions["mapped_row_count"] == 3
+    assert dimensions["genus_values"] == ["Alpha", "Beta", "Gamma"]
     assert dimensions["species_values"] == ["Alpha one", "Beta one", "Gamma one"]
 
 
@@ -76,6 +79,7 @@ def test_query_grid_bins_applies_include_exclude_and_year_range(
     )
     filters = query.SlicerState(
         include_families=["A", "B"],
+        include_genera=["Alpha", "Beta"],
         exclude_species=["Beta one"],
         include_states=["Victoria", "New South Wales", "Queensland"],
         year_min=2010,
@@ -105,6 +109,7 @@ def test_cross_filter_options_respect_current_slicer_state(tmp_path: Path) -> No
     options = query.option_values(outputs.grid_bins, filters)
 
     assert options["families"] == ["A"]
+    assert options["genera"] == ["Alpha"]
     assert options["species"] == ["Alpha one"]
     assert options["states"] == ["New South Wales", "Victoria"]
     assert options["years"] == [2010, 2011]
@@ -133,10 +138,18 @@ def test_year_summary_supports_year_comparison(tmp_path: Path) -> None:
 
 def test_dashboard_precomputes_deck_visual_fields() -> None:
     rows = dashboard.add_visual_fields(
-        [{"species": "Alpha one", "record_count": 4, "lat_bin": -37.8, "lon_bin": 144.9}]
+        [
+            {
+                "genus": "Alpha",
+                "species": "Alpha one",
+                "record_count": 4,
+                "lat_bin": -37.8,
+                "lon_bin": 144.9,
+            }
+        ]
     )
 
-    assert rows[0]["color"] == dashboard.species_color("Alpha one")
+    assert rows[0]["color"] == dashboard.genus_color("Alpha")
     assert rows[0]["radius"] == 27_000
 
 

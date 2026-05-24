@@ -13,6 +13,8 @@ import duckdb
 class SlicerState:
     include_families: list[str] = field(default_factory=list)
     exclude_families: list[str] = field(default_factory=list)
+    include_genera: list[str] = field(default_factory=list)
+    exclude_genera: list[str] = field(default_factory=list)
     include_species: list[str] = field(default_factory=list)
     exclude_species: list[str] = field(default_factory=list)
     include_states: list[str] = field(default_factory=list)
@@ -23,6 +25,7 @@ class SlicerState:
 
 FILTER_COLUMNS = {
     "family": ("include_families", "exclude_families"),
+    "genus": ("include_genera", "exclude_genera"),
     "species": ("include_species", "exclude_species"),
     "stateProvince": ("include_states", "exclude_states"),
 }
@@ -76,6 +79,7 @@ def query_grid_bins(
                 lat_bin,
                 lon_bin,
                 family,
+                genus,
                 species,
                 stateProvince,
                 SUM(record_count) AS record_count,
@@ -89,7 +93,7 @@ def query_grid_bins(
                 END AS year_range
             FROM read_parquet({sql_string(Path(grid_path).as_posix())})
             {where_sql(filters)}
-            GROUP BY lat_bin, lon_bin, family, species, stateProvince
+            GROUP BY lat_bin, lon_bin, family, genus, species, stateProvince
             ORDER BY record_count DESC
             LIMIT {int(limit)}
         """
@@ -122,6 +126,7 @@ def option_values(grid_path: Path, filters: SlicerState) -> dict[str, list[Any]]
         options: dict[str, list[Any]] = {}
         for output_key, column in (
             ("families", "family"),
+            ("genera", "genus"),
             ("species", "species"),
             ("states", "stateProvince"),
             ("years", "year"),

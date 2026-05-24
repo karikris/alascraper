@@ -36,8 +36,8 @@ DEFAULT_MAP_POINT_LIMIT = 250_000
 MAP_HEIGHT_PX = 820
 
 
-def species_color(species: str | None) -> list[int]:
-    text = species or "not supplied"
+def genus_color(genus: str | None) -> list[int]:
+    text = genus or "not supplied"
     digest = hashlib.sha256(text.encode("utf-8")).digest()
     return [80 + digest[0] % 150, 70 + digest[1] % 160, 90 + digest[2] % 140, 170]
 
@@ -51,7 +51,7 @@ def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             **row,
-            "color": species_color(row.get("species")),
+            "color": genus_color(row.get("genus")),
             "radius": point_radius(row.get("record_count")),
         }
         for row in rows
@@ -159,6 +159,7 @@ def render_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
         tooltip={
             "text": (
                 "{species}\n"
+                "{genus}\n"
                 "{family}\n"
                 "{stateProvince}, {year_range}\n"
                 "Records: {record_count}"
@@ -206,11 +207,25 @@ def main() -> None:
 
     base_options = query.option_values(grid_path, query.SlicerState())
     partial_slicers = build_partial_slicer_state(base_options, st.sidebar)
-    species_options = query.option_values(grid_path, partial_slicers)["species"]
+    genus_options = query.option_values(grid_path, partial_slicers)["genera"]
+    include_genera, exclude_genera = filter_mode("Genus", genus_options, st.sidebar)
+    genus_slicers = query.SlicerState(
+        include_families=partial_slicers.include_families,
+        exclude_families=partial_slicers.exclude_families,
+        include_genera=include_genera,
+        exclude_genera=exclude_genera,
+        include_states=partial_slicers.include_states,
+        exclude_states=partial_slicers.exclude_states,
+        year_min=partial_slicers.year_min,
+        year_max=partial_slicers.year_max,
+    )
+    species_options = query.option_values(grid_path, genus_slicers)["species"]
     include_species, exclude_species = filter_mode("Species", species_options, st.sidebar)
     slicers = query.SlicerState(
         include_families=partial_slicers.include_families,
         exclude_families=partial_slicers.exclude_families,
+        include_genera=include_genera,
+        exclude_genera=exclude_genera,
         include_species=include_species,
         exclude_species=exclude_species,
         include_states=partial_slicers.include_states,
@@ -221,6 +236,7 @@ def main() -> None:
     filtered_options = query.option_values(grid_path, slicers)
     st.sidebar.caption(
         f"Families: {len(filtered_options['families'])} | "
+        f"Genera: {len(filtered_options['genera'])} | "
         f"Species: {len(filtered_options['species'])} | "
         f"States: {len(filtered_options['states'])}"
     )
