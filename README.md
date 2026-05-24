@@ -258,6 +258,25 @@ datasets/<class>/<order>/<family>/quality_reports/
 └── family_notes.md                  # only when notes are entered
 ```
 
+Join the six Australian butterfly family outputs into one Parquet dataset and
+write the same quality-report shape for the joined output:
+
+```bash
+.venv/bin/python scripts/cleaning/join_butterfly_families.py --overwrite
+```
+
+Joined butterfly outputs:
+
+```text
+datasets/insecta/lepidoptera/
+├── butterflies.parquet
+├── butterflies_metadata.json
+└── quality_reports/
+    ├── butterflies_quality_summary.json
+    ├── butterflies_column_profile.csv
+    └── butterflies_categorical_top_values.csv
+```
+
 ## Privacy Defaults
 
 `INCLUDE_USER_DATA_FIELDS = False` omits observer/user and source-linked fields.
