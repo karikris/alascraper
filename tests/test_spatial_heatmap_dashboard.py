@@ -137,4 +137,4 @@ def test_dashboard_precomputes_deck_visual_fields() -> None:
     )
 
     assert rows[0]["color"] == dashboard.species_color("Alpha one")
-    assert rows[0]["radius"] == 13_000
+    assert rows[0]["radius"] == 27_000

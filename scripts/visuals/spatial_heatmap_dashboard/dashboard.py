@@ -33,6 +33,7 @@ MAINLAND_STATES = [
 ]
 CARTO_POSITRON_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 DEFAULT_MAP_POINT_LIMIT = 250_000
+MAP_HEIGHT_PX = 820
 
 
 def species_color(species: str | None) -> list[int]:
@@ -43,7 +44,7 @@ def species_color(species: str | None) -> list[int]:
 
 def point_radius(record_count: int | float | None) -> float:
     count = max(float(record_count or 0), 1.0)
-    return min(85_000.0, 8_000.0 + math.sqrt(count) * 2_500.0)
+    return min(140_000.0, 18_000.0 + math.sqrt(count) * 4_500.0)
 
 
 def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -151,7 +152,7 @@ def render_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
             )
         },
     )
-    st.pydeck_chart(deck, use_container_width=True)
+    st.pydeck_chart(deck, width="stretch", height=MAP_HEIGHT_PX)
 
 
 def main() -> None:
@@ -165,6 +166,20 @@ def main() -> None:
         ) from exc
 
     st.set_page_config(page_title="Butterfly Spatial Heatmap", layout="wide")
+    st.markdown(
+        """
+        <style>
+        .block-container {
+            padding-top: 1.2rem;
+            padding-bottom: 1rem;
+        }
+        div[data-testid="stMetric"] {
+            padding: 0.15rem 0;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.title("Butterfly Spatial Heatmap")
     grid_path = Path(
         st.sidebar.text_input("Grid bins parquet", value=str(DEFAULT_GRID_PATH))
@@ -173,6 +188,8 @@ def main() -> None:
         st.error(f"Missing grid bins: {grid_path}")
         st.stop()
     map_point_limit = map_point_limit_selector(st.sidebar)
+    show_year_comparison = st.sidebar.checkbox("Show year comparison", value=False)
+    show_filtered_rows = st.sidebar.checkbox("Show filtered rows", value=False)
 
     base_options = query.option_values(grid_path, query.SlicerState())
     partial_slicers = build_partial_slicer_state(base_options, st.sidebar)
@@ -199,21 +216,22 @@ def main() -> None:
     years = query.year_summary(grid_path, slicers)
     matching_records = query.mapped_record_count(grid_path, slicers)
     total_records = sum(int(row["record_count"]) for row in rows)
-    col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("Map bins", f"{len(rows):,}")
-    col_b.metric("Visible records", f"{total_records:,}")
-    col_c.metric("Matching records", f"{matching_records:,}")
-    col_d.metric("Years", f"{len(years):,}")
+    st.sidebar.metric("Map bins", f"{len(rows):,}")
+    st.sidebar.metric("Visible records", f"{total_records:,}")
+    st.sidebar.metric("Matching records", f"{matching_records:,}")
+    st.sidebar.metric("Years", f"{len(years):,}")
     if total_records < matching_records:
-        st.warning(
+        st.sidebar.warning(
             f"Map point cap is hiding {matching_records - total_records:,} matching records. "
             "Increase Max map points or narrow the slicers."
         )
 
     render_map(rows, st, pdk)
-    st.subheader("Year comparison")
-    st.bar_chart(years, x="year", y="record_count")
-    with st.expander("Filtered map rows"):
+    if show_year_comparison:
+        st.subheader("Year comparison")
+        st.bar_chart(years, x="year", y="record_count")
+    if show_filtered_rows:
+        st.subheader("Filtered map rows")
         st.dataframe(rows, use_container_width=True)
 
 
