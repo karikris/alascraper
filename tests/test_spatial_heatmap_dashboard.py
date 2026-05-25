@@ -635,7 +635,7 @@ def test_dashboard_title_is_butterfly_dashboard() -> None:
 
 
 def test_dashboard_main_map_height_matches_requested_frame() -> None:
-    assert dashboard.MAP_HEIGHT_PX == 1_230
+    assert dashboard.MAP_HEIGHT_PX == 1_180
 
 
 def test_dashboard_uses_fixed_family_palette() -> None:
