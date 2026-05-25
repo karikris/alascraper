@@ -51,8 +51,27 @@ MAP_DISPLAY_MODES = [
     SINGLE_COLOR_MODE,
     SHARE_HEATMAP_MODE,
 ]
-DOMINANT_POINT_MIN_RADIUS_PX = 3
-DOMINANT_POINT_MAX_RADIUS_PX = 18
+DOMINANT_POINT_RADIUS_SCALE: tuple[tuple[int, int], ...] = (
+    (1, 3),
+    (10, 4),
+    (25, 5),
+    (50, 6),
+    (100, 7),
+    (250, 8),
+    (500, 9),
+    (750, 10),
+    (1_000, 11),
+    (2_500, 12),
+    (5_000, 14),
+    (7_500, 16),
+    (10_000, 18),
+    (15_000, 20),
+    (20_000, 22),
+    (25_000, 24),
+    (50_000, 26),
+)
+DOMINANT_POINT_MIN_RADIUS_PX = DOMINANT_POINT_RADIUS_SCALE[0][1]
+DOMINANT_POINT_MAX_RADIUS_PX = DOMINANT_POINT_RADIUS_SCALE[-1][1]
 PIE_ICON_CANVAS_PX = 128
 PIE_ICON_MIN_SIZE_PX = 2
 PIE_ICON_MAX_SIZE_PX = 6
@@ -98,11 +117,20 @@ def point_radius(record_count: int | float | None) -> float:
 
 def dominant_point_radius(total_record_count: int | float | None) -> int:
     count = max(float(total_record_count or 0), 1.0)
-    scale = min(math.log10(count) / 7.0, 1.0)
-    radius = DOMINANT_POINT_MIN_RADIUS_PX + scale * (
-        DOMINANT_POINT_MAX_RADIUS_PX - DOMINANT_POINT_MIN_RADIUS_PX
-    )
-    return round(radius)
+    first_count, first_radius = DOMINANT_POINT_RADIUS_SCALE[0]
+    if count <= first_count:
+        return first_radius
+
+    for (lower_count, lower_radius), (upper_count, upper_radius) in zip(
+        DOMINANT_POINT_RADIUS_SCALE,
+        DOMINANT_POINT_RADIUS_SCALE[1:],
+    ):
+        if count <= upper_count:
+            position = (count - lower_count) / (upper_count - lower_count)
+            radius = lower_radius + position * (upper_radius - lower_radius)
+            return round(radius)
+
+    return DOMINANT_POINT_MAX_RADIUS_PX
 
 
 def color_to_hex(color: list[int]) -> str:
