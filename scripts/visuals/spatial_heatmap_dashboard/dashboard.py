@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import math
 import sys
 from pathlib import Path
@@ -417,6 +418,22 @@ def coordinate_precision_selector(st: Any) -> int:
     return COORDINATE_PRECISION_LEVELS[selected_label]
 
 
+def query_with_coordinate_precision(
+    query_function: Any,
+    *args: Any,
+    coordinate_decimals: int | None,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    parameters = inspect.signature(query_function).parameters
+    accepts_coordinate_decimals = "coordinate_decimals" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if accepts_coordinate_decimals:
+        kwargs["coordinate_decimals"] = coordinate_decimals
+    return query_function(*args, **kwargs)
+
+
 def max_share_heatmaps_selector(st: Any) -> int:
     return int(
         st.number_input(
@@ -745,48 +762,53 @@ def main() -> None:
 
     share_limit_per_category = min(map_point_limit, DEFAULT_SHARE_HEATMAP_POINT_LIMIT)
     if map_display_mode == DOMINANT_CATEGORY_MODE:
-        rows = query.query_composition_markers(
+        rows = query_with_coordinate_precision(
+            query.query_composition_markers,
             grid_path,
             slicers,
+            coordinate_decimals=coordinate_decimals,
             limit=map_point_limit,
             locked_color_dimension=locked_color_dimension,
-            coordinate_decimals=coordinate_decimals,
         )
     elif map_display_mode == CATEGORY_SHARE_HEATMAPS_MODE:
-        rows = query.query_all_share_heatmap_bins(
+        rows = query_with_coordinate_precision(
+            query.query_all_share_heatmap_bins,
             grid_path,
             slicers,
+            coordinate_decimals=coordinate_decimals,
             limit_per_category=share_limit_per_category,
             locked_color_dimension=locked_color_dimension,
-            coordinate_decimals=coordinate_decimals,
             max_categories=max_share_heatmaps,
         )
     elif map_display_mode == PIECHART_COMPOSITION_MODE:
-        rows = query.query_composition_markers(
+        rows = query_with_coordinate_precision(
+            query.query_composition_markers,
             grid_path,
             slicers,
+            coordinate_decimals=coordinate_decimals,
             limit=map_point_limit,
             locked_color_dimension=locked_color_dimension,
-            coordinate_decimals=coordinate_decimals,
         )
     elif map_display_mode == SHARE_HEATMAP_MODE and focus_value:
-        rows = query.query_share_heatmap_bins(
+        rows = query_with_coordinate_precision(
+            query.query_share_heatmap_bins,
             grid_path,
             slicers,
+            coordinate_decimals=coordinate_decimals,
             focus_value=focus_value,
             limit=map_point_limit,
             locked_color_dimension=locked_color_dimension,
-            coordinate_decimals=coordinate_decimals,
         )
     elif map_display_mode == SHARE_HEATMAP_MODE:
         rows = []
     else:
-        rows = query.query_grid_bins(
+        rows = query_with_coordinate_precision(
+            query.query_grid_bins,
             grid_path,
             slicers,
+            coordinate_decimals=coordinate_decimals,
             limit=map_point_limit,
             locked_color_dimension=locked_color_dimension,
-            coordinate_decimals=coordinate_decimals,
         )
     years = query.year_summary(grid_path, slicers)
     matching_records = query.mapped_record_count(grid_path, slicers)
