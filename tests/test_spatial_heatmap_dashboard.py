@@ -71,6 +71,27 @@ def write_many_category_fixture(path: Path) -> None:
     ).write_parquet(path)
 
 
+def write_precision_fixture(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "lat_bin": [-37.81, -37.82, -33.86],
+            "lon_bin": [144.96, 144.97, 151.21],
+            "family": ["A", "A", "B"],
+            "genus": ["Alpha", "Alpha", "Beta"],
+            "species": ["Alpha one", "Alpha two", "Beta one"],
+            "scientificName": ["Alpha one", "Alpha two", "Beta one"],
+            "stateProvince": ["Victoria", "Victoria", "New South Wales"],
+            "year": [2010, 2011, 2012],
+            "record_count": [2, 3, 5],
+            "distinct_scientific_names": [1, 1, 1],
+            "distinct_taxon_concepts": [1, 1, 1],
+            "min_year": [2010, 2011, 2012],
+            "max_year": [2010, 2011, 2012],
+        }
+    ).write_parquet(path)
+
+
 def test_build_grid_bins_excludes_null_coordinates_and_aggregates(
     tmp_path: Path,
 ) -> None:
@@ -108,6 +129,10 @@ def test_build_grid_bins_excludes_null_coordinates_and_aggregates(
     assert dimensions["genus_values"] == ["Alpha", "Beta", "Gamma"]
     assert dimensions["species_values"] == ["Alpha one", "Beta one", "Gamma one"]
     assert dimensions["scientific_name_values"] == ["Alpha one", "Beta one", "Gamma one", "Unknown"]
+
+
+def test_build_spatial_bins_defaults_to_local_coordinate_precision() -> None:
+    assert bins.DEFAULT_GRID_DECIMALS == 2
 
 
 def test_query_grid_bins_applies_include_exclude_and_year_range(
@@ -329,6 +354,52 @@ def test_composition_markers_return_one_row_per_coordinate_with_shares(
             "composition_text": "A: 7 (70.0%)\nB: 3 (30.0%)",
         }
     ]
+
+
+def test_composition_markers_round_coordinates_to_requested_precision(
+    tmp_path: Path,
+) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_precision_fixture(grid)
+
+    local_rows = query.query_composition_markers(
+        grid,
+        query.SlicerState(),
+        coordinate_decimals=2,
+    )
+    regional_rows = query.query_composition_markers(
+        grid,
+        query.SlicerState(),
+        coordinate_decimals=1,
+    )
+    coarse_rows = query.query_composition_markers(
+        grid,
+        query.SlicerState(),
+        coordinate_decimals=0,
+    )
+
+    assert {
+        (row["lat_bin"], row["lon_bin"], row["total_record_count"])
+        for row in local_rows
+    } == {
+        (-37.81, 144.96, 2),
+        (-37.82, 144.97, 3),
+        (-33.86, 151.21, 5),
+    }
+    assert {
+        (row["lat_bin"], row["lon_bin"], row["total_record_count"])
+        for row in regional_rows
+    } == {
+        (-37.8, 145.0, 5),
+        (-33.9, 151.2, 5),
+    }
+    assert {
+        (row["lat_bin"], row["lon_bin"], row["total_record_count"])
+        for row in coarse_rows
+    } == {
+        (-38.0, 145.0, 5),
+        (-34.0, 151.0, 5),
+    }
 
 
 def test_composition_markers_state_and_year_filters_do_not_change_color_level(
@@ -628,6 +699,29 @@ def test_dashboard_map_display_selector_uses_versioned_state_key() -> None:
     assert selected == dashboard.DOMINANT_CATEGORY_MODE
     assert sidebar.index == 0
     assert sidebar.key == "map_display_mode_v4"
+
+
+def test_dashboard_coordinate_precision_selector_defaults_to_regional() -> None:
+    class FakeSidebar:
+        def __init__(self) -> None:
+            self.options = None
+            self.index = None
+            self.key = None
+
+        def selectbox(self, _label: str, options: list[str], **kwargs: object) -> str:
+            self.options = options
+            self.index = kwargs["index"]
+            self.key = kwargs["key"]
+            return "Regional"
+
+    sidebar = FakeSidebar()
+
+    selected = dashboard.coordinate_precision_selector(sidebar)
+
+    assert selected == 1
+    assert sidebar.options == ["Regional", "Local", "Coarse"]
+    assert sidebar.index == 0
+    assert sidebar.key == "coordinate_precision_v1"
 
 
 def test_dashboard_title_is_butterfly_dashboard() -> None:

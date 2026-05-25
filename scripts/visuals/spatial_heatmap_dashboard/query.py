@@ -62,6 +62,37 @@ def sql_string(value: str | Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def coordinate_source_sql(
+    grid_path: Path,
+    coordinate_decimals: int | None = None,
+) -> str:
+    source = f"read_parquet({sql_string(Path(grid_path).as_posix())})"
+    if coordinate_decimals is None:
+        return source
+
+    decimals = max(int(coordinate_decimals), 0)
+    return f"""
+        (
+            SELECT
+                round(lat_bin, {decimals}) AS lat_bin,
+                round(lon_bin, {decimals}) AS lon_bin,
+                family,
+                genus,
+                species,
+                scientificName,
+                year,
+                stateProvince,
+                SUM(record_count) AS record_count,
+                SUM(distinct_scientific_names) AS distinct_scientific_names,
+                SUM(distinct_taxon_concepts) AS distinct_taxon_concepts,
+                MIN(min_year) AS min_year,
+                MAX(max_year) AS max_year
+            FROM {source}
+            GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+        )
+    """
+
+
 def value_list(values: list[str]) -> str:
     return "(" + ", ".join(sql_string(value) for value in values) + ")"
 
@@ -136,12 +167,14 @@ def query_grid_bins(
     *,
     limit: int = 250_000,
     locked_color_dimension: str | None = None,
+    coordinate_decimals: int | None = None,
 ) -> list[dict[str, Any]]:
     con = duckdb.connect(":memory:")
     try:
         color_by = color_dimension(filters, locked_color_dimension)
         group_columns = GROUP_COLUMNS_BY_COLOR_DIMENSION[color_by]
         group_sql = ", ".join(group_columns)
+        source = coordinate_source_sql(grid_path, coordinate_decimals)
         query = f"""
             SELECT
                 {grouped_select_columns(group_columns)},
@@ -156,7 +189,7 @@ def query_grid_bins(
                 END AS year_range,
                 {sql_string(color_by)} AS color_level,
                 COALESCE(CAST({color_by} AS VARCHAR), 'not supplied') AS color_value
-            FROM read_parquet({sql_string(Path(grid_path).as_posix())})
+            FROM {source}
             {where_sql(filters)}
             GROUP BY {group_sql}
             ORDER BY record_count DESC
@@ -204,6 +237,7 @@ def query_share_heatmap_bins(
     focus_value: str,
     limit: int = 250_000,
     locked_color_dimension: str | None = None,
+    coordinate_decimals: int | None = None,
     top_competitors: int = 5,
 ) -> list[dict[str, Any]]:
     if not focus_value:
@@ -212,7 +246,7 @@ def query_share_heatmap_bins(
     con = duckdb.connect(":memory:")
     try:
         color_by = color_dimension(filters, locked_color_dimension)
-        source = f"read_parquet({sql_string(Path(grid_path).as_posix())})"
+        source = coordinate_source_sql(grid_path, coordinate_decimals)
         filtered = f"""
             SELECT
                 *,
@@ -321,12 +355,13 @@ def query_all_share_heatmap_bins(
     *,
     limit_per_category: int = 50_000,
     locked_color_dimension: str | None = None,
+    coordinate_decimals: int | None = None,
     max_categories: int = 12,
 ) -> list[dict[str, Any]]:
     con = duckdb.connect(":memory:")
     try:
         color_by = color_dimension(filters, locked_color_dimension)
-        source = f"read_parquet({sql_string(Path(grid_path).as_posix())})"
+        source = coordinate_source_sql(grid_path, coordinate_decimals)
         limit_per_category = max(int(limit_per_category), 1)
         max_categories = max(int(max_categories), 1)
         result = con.execute(
@@ -427,12 +462,13 @@ def query_composition_markers(
     *,
     limit: int = 250_000,
     locked_color_dimension: str | None = None,
+    coordinate_decimals: int | None = None,
     top_n: int = 8,
 ) -> list[dict[str, Any]]:
     con = duckdb.connect(":memory:")
     try:
         color_by = color_dimension(filters, locked_color_dimension)
-        source = f"read_parquet({sql_string(Path(grid_path).as_posix())})"
+        source = coordinate_source_sql(grid_path, coordinate_decimals)
         top_n = max(int(top_n), 1)
         result = con.execute(
             f"""
