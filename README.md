@@ -219,6 +219,40 @@ datasets/<class_or_misc>/<order>/<family>/
 └── run_log.txt
 ```
 
+## State Source Adapters
+
+State-source fetches are separate from the stable ALA workflow. They write
+source-specific Parquet and an impact report first; `ala_species_records.parquet`
+is not changed by these scripts.
+
+NSW BioNet is the first public adapter. It fetches public BioNet Species
+Sightings records for the six Australian butterfly families and reports the
+expected harmonised-table effect against the current ALA Parquet:
+
+```bash
+.venv/bin/python scripts/fetch_state_sources.py --source nsw_bionet
+```
+
+For smoke tests, cap the fetch:
+
+```bash
+.venv/bin/python scripts/fetch_state_sources.py --source nsw_bionet --limit 100
+```
+
+Outputs:
+
+```text
+datasets/insecta/lepidoptera/nsw_bionet/
+├── nsw_bionet_occurrences.parquet
+├── metadata.json
+└── nsw_bionet_impact_report.json
+```
+
+The impact report estimates candidate duplicate and candidate-new source rows
+using scientific name, event date, and rounded coordinates. Treat this as a
+review queue before building a harmonised occurrence table, not as a destructive
+dedupe operation.
+
 ## Cleaning + Quality Profiling
 
 Cleaning and quality-inspection scripts live under `scripts/cleaning/`.

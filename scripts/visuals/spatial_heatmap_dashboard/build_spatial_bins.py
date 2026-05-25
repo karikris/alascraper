@@ -60,14 +60,20 @@ def spatial_source(lazy_frame: pl.LazyFrame, grid_decimals: int) -> pl.LazyFrame
 
 def with_conservation_columns(lazy_frame: pl.LazyFrame) -> pl.LazyFrame:
     schema = lazy_frame.collect_schema()
+    conservation_columns = [
+        pl.col(column).cast(pl.String).alias(column)
+        for column in CONSERVATION_COLUMNS
+        if column in schema
+    ]
     missing_columns = [
         pl.lit(None, dtype=pl.String).alias(column)
         for column in CONSERVATION_COLUMNS
         if column not in schema
     ]
-    if not missing_columns:
+    columns = [*conservation_columns, *missing_columns]
+    if not columns:
         return lazy_frame
-    return lazy_frame.with_columns(missing_columns)
+    return lazy_frame.with_columns(columns)
 
 
 def grid_aggregates(lazy_frame: pl.LazyFrame, grid_decimals: int) -> pl.DataFrame:
