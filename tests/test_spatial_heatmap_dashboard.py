@@ -204,6 +204,106 @@ def test_share_heatmap_state_and_year_filters_do_not_change_color_level(
     assert rows[0]["share"] == 1.0
 
 
+def test_all_share_heatmaps_return_active_family_categories(tmp_path: Path) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_share_fixture(grid)
+
+    rows = query.query_all_share_heatmap_bins(
+        grid,
+        query.SlicerState(include_states=["Victoria"]),
+        locked_color_dimension="family",
+    )
+
+    assert [(row["color_value"], row["record_count"]) for row in rows] == [
+        ("A", 7),
+        ("B", 3),
+    ]
+    assert {row["color_level"] for row in rows} == {"family"}
+    assert {row["total_cell_records"] for row in rows} == {10}
+    assert {row["share_percent"] for row in rows} == {"70.0%", "30.0%"}
+    assert rows[0]["category_total_records"] == 7
+    assert rows[0]["share"] == 0.7
+
+
+def test_all_share_heatmaps_drill_down_to_genus_species_and_scientific_name(
+    tmp_path: Path,
+) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_share_fixture(grid)
+
+    genus_rows = query.query_all_share_heatmap_bins(
+        grid,
+        query.SlicerState(include_families=["A"]),
+    )
+    species_rows = query.query_all_share_heatmap_bins(
+        grid,
+        query.SlicerState(include_families=["A"], include_genera=["Alpha"]),
+    )
+    scientific_name_rows = query.query_all_share_heatmap_bins(
+        grid,
+        query.SlicerState(
+            include_families=["A"],
+            include_genera=["Alpha"],
+            include_species=["Alpha one"],
+        ),
+    )
+
+    assert {row["color_level"] for row in genus_rows} == {"genus"}
+    assert {row["color_value"] for row in genus_rows} == {"Alpha"}
+    assert {row["color_level"] for row in species_rows} == {"species"}
+    assert {row["color_value"] for row in species_rows} == {"Alpha one", "Alpha two"}
+    assert {row["color_level"] for row in scientific_name_rows} == {"scientificName"}
+    assert {row["color_value"] for row in scientific_name_rows} == {"Alpha one"}
+
+
+def test_all_share_heatmaps_state_and_year_filters_do_not_change_color_level(
+    tmp_path: Path,
+) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_share_fixture(grid)
+    filters = query.SlicerState(
+        include_families=["A"],
+        include_states=["Victoria"],
+        year_min=2011,
+        year_max=2011,
+    )
+
+    rows = query.query_all_share_heatmap_bins(grid, filters)
+
+    assert rows == [
+        {
+            "lat_bin": -37.8,
+            "lon_bin": 145.0,
+            "record_count": 1,
+            "total_cell_records": 1,
+            "category_total_records": 1,
+            "share": 1.0,
+            "share_percent": "100.0%",
+            "color_level": "genus",
+            "color_value": "Alpha",
+            "composition_text": "Alpha: 1 / 1 (100.0%)",
+        }
+    ]
+
+
+def test_all_share_heatmaps_cap_categories_and_rows_per_category(
+    tmp_path: Path,
+) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_many_category_fixture(grid)
+
+    rows = query.query_all_share_heatmap_bins(
+        grid,
+        query.SlicerState(include_families=["A"]),
+        max_categories=3,
+        limit_per_category=1,
+    )
+
+    assert [row["color_value"] for row in rows] == ["Genus 0", "Genus 1", "Genus 2"]
+    assert [row["category_total_records"] for row in rows] == [10, 9, 8]
+    assert {row["color_level"] for row in rows} == {"genus"}
+
+
 def test_composition_markers_return_one_row_per_coordinate_with_shares(
     tmp_path: Path,
 ) -> None:
@@ -365,6 +465,33 @@ def test_dashboard_precomputes_share_heatmap_visual_fields() -> None:
     assert rows[0]["color"][3] < rows[1]["color"][3]
 
 
+def test_dashboard_precomputes_category_share_heatmap_visual_fields() -> None:
+    rows = dashboard.add_category_share_heatmap_visual_fields(
+        [
+            {
+                "color_level": "family",
+                "color_value": "Nymphalidae",
+                "record_count": 2,
+                "total_cell_records": 100,
+                "share": 0.25,
+            },
+            {
+                "color_level": "family",
+                "color_value": "Nymphalidae",
+                "record_count": 50,
+                "total_cell_records": 100,
+                "share": 1.0,
+            },
+        ]
+    )
+
+    assert rows[0]["radius"] == dashboard.point_radius(100)
+    assert rows[1]["radius"] == dashboard.point_radius(100)
+    assert rows[0]["color"][:3] == dashboard.FAMILY_COLORS["Nymphalidae"][:3]
+    assert rows[0]["color"][3] < rows[1]["color"][3]
+    assert rows[0]["share_percent"] == "25.0%"
+
+
 def test_dashboard_builds_piechart_icon_visual_fields() -> None:
     rows = dashboard.add_piechart_visual_fields(
         [
@@ -409,8 +536,8 @@ def test_dashboard_map_display_modes_include_piechart_composition() -> None:
     assert dashboard.PIECHART_COMPOSITION_MODE in dashboard.MAP_DISPLAY_MODES
 
 
-def test_dashboard_defaults_to_piechart_composition_mode() -> None:
-    assert dashboard.MAP_DISPLAY_MODES[0] == dashboard.PIECHART_COMPOSITION_MODE
+def test_dashboard_defaults_to_category_share_heatmaps_mode() -> None:
+    assert dashboard.MAP_DISPLAY_MODES[0] == dashboard.CATEGORY_SHARE_HEATMAPS_MODE
 
 
 def test_dashboard_map_display_selector_uses_versioned_state_key() -> None:
@@ -422,15 +549,15 @@ def test_dashboard_map_display_selector_uses_versioned_state_key() -> None:
         def selectbox(self, *_args: object, **kwargs: object) -> str:
             self.key = kwargs["key"]
             self.index = kwargs["index"]
-            return dashboard.PIECHART_COMPOSITION_MODE
+            return dashboard.CATEGORY_SHARE_HEATMAPS_MODE
 
     sidebar = FakeSidebar()
 
     selected = dashboard.map_display_selector(sidebar)
 
-    assert selected == dashboard.PIECHART_COMPOSITION_MODE
+    assert selected == dashboard.CATEGORY_SHARE_HEATMAPS_MODE
     assert sidebar.index == 0
-    assert sidebar.key == "map_display_mode_v2"
+    assert sidebar.key == "map_display_mode_v3"
 
 
 def test_dashboard_title_is_butterfly_dashboard() -> None:

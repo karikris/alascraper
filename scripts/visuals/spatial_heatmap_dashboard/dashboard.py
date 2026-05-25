@@ -35,11 +35,20 @@ MAINLAND_STATES = [
 ]
 CARTO_POSITRON_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 DEFAULT_MAP_POINT_LIMIT = 250_000
+DEFAULT_SHARE_HEATMAP_POINT_LIMIT = 50_000
+DEFAULT_MAX_SHARE_HEATMAPS = 12
 MAP_HEIGHT_PX = 820
+SHARE_HEATMAP_PANEL_HEIGHT_PX = 320
+CATEGORY_SHARE_HEATMAPS_MODE = "Category share heatmaps"
 SINGLE_COLOR_MODE = "Single-color bubbles"
 PIECHART_COMPOSITION_MODE = "Piechart composition markers"
 SHARE_HEATMAP_MODE = "Selected-category share heatmap"
-MAP_DISPLAY_MODES = [PIECHART_COMPOSITION_MODE, SINGLE_COLOR_MODE, SHARE_HEATMAP_MODE]
+MAP_DISPLAY_MODES = [
+    CATEGORY_SHARE_HEATMAPS_MODE,
+    PIECHART_COMPOSITION_MODE,
+    SINGLE_COLOR_MODE,
+    SHARE_HEATMAP_MODE,
+]
 PIE_ICON_CANVAS_PX = 128
 PIE_ICON_MIN_SIZE_PX = 2
 PIE_ICON_MAX_SIZE_PX = 6
@@ -152,6 +161,22 @@ def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+def add_category_share_heatmap_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    visual_rows = []
+    for row in rows:
+        color = map_color(row.get("color_level"), row.get("color_value")).copy()
+        color[3] = share_alpha(row.get("share"))
+        visual_rows.append(
+            {
+                **row,
+                "color": color,
+                "radius": point_radius(row.get("total_cell_records")),
+                "share_percent": f"{float(row.get('share') or 0) * 100:.1f}%",
+            }
+        )
+    return visual_rows
 
 
 def add_piechart_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -296,6 +321,18 @@ def map_point_limit_selector(st: Any) -> int:
     )
 
 
+def max_share_heatmaps_selector(st: Any) -> int:
+    return int(
+        st.number_input(
+            "Max share heatmaps",
+            min_value=1,
+            max_value=24,
+            value=DEFAULT_MAX_SHARE_HEATMAPS,
+            step=1,
+        )
+    )
+
+
 def color_lock_selector(st: Any) -> str | None:
     if not st.checkbox("Lock color level", value=False):
         return None
@@ -308,7 +345,7 @@ def color_lock_selector(st: Any) -> str | None:
 
 
 def map_display_selector(st: Any) -> str:
-    return st.selectbox("Map display", MAP_DISPLAY_MODES, index=0, key="map_display_mode_v2")
+    return st.selectbox("Map display", MAP_DISPLAY_MODES, index=0, key="map_display_mode_v3")
 
 
 def share_focus_selector(st: Any, options: list[dict[str, Any]]) -> str | None:
@@ -393,6 +430,56 @@ def render_share_heatmap(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
     st.pydeck_chart(deck, width="stretch", height=MAP_HEIGHT_PX)
 
 
+def rows_by_color_value(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["color_value"]), []).append(row)
+    return grouped
+
+
+def render_category_share_heatmaps(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
+    grouped_rows = rows_by_color_value(rows)
+    category_items = list(grouped_rows.items())
+    for index in range(0, len(category_items), 2):
+        columns = st.columns(2)
+        for column, (color_value, category_rows) in zip(
+            columns,
+            category_items[index : index + 2],
+            strict=False,
+        ):
+            total = int(category_rows[0].get("category_total_records") or 0)
+            column.subheader(f"{color_value} ({total:,})")
+            map_rows = add_category_share_heatmap_visual_fields(category_rows)
+            layer = pdk.Layer(
+                "ScatterplotLayer",
+                map_rows,
+                get_position="[lon_bin, lat_bin]",
+                get_radius="radius",
+                get_fill_color="color",
+                pickable=True,
+                opacity=0.85,
+            )
+            deck = pdk.Deck(
+                map_style=CARTO_POSITRON_STYLE,
+                initial_view_state=pdk.ViewState(
+                    latitude=-25.3,
+                    longitude=134.5,
+                    zoom=3.2,
+                    pitch=0,
+                ),
+                layers=[layer],
+                tooltip={
+                    "text": (
+                        "{color_level}: {color_value}\n"
+                        "Records: {record_count}\n"
+                        "Total records here: {total_cell_records}\n"
+                        "Share: {share_percent}"
+                    )
+                },
+            )
+            column.pydeck_chart(deck, width="stretch", height=SHARE_HEATMAP_PANEL_HEIGHT_PX)
+
+
 def render_piechart_composition(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
     map_rows = add_piechart_visual_fields(rows)
     layer = pdk.Layer(
@@ -469,6 +556,11 @@ def main() -> None:
     map_point_limit = map_point_limit_selector(max_controls)
     locked_color_dimension = color_lock_selector(max_controls)
     map_display_mode = map_display_selector(max_controls)
+    max_share_heatmaps = (
+        max_share_heatmaps_selector(max_controls)
+        if map_display_mode == CATEGORY_SHARE_HEATMAPS_MODE
+        else DEFAULT_MAX_SHARE_HEATMAPS
+    )
     partial_slicers = build_partial_slicer_state(
         base_options,
         family_controls,
@@ -522,7 +614,16 @@ def main() -> None:
         )
         focus_value = share_focus_selector(max_controls, focus_options)
 
-    if map_display_mode == PIECHART_COMPOSITION_MODE:
+    share_limit_per_category = min(map_point_limit, DEFAULT_SHARE_HEATMAP_POINT_LIMIT)
+    if map_display_mode == CATEGORY_SHARE_HEATMAPS_MODE:
+        rows = query.query_all_share_heatmap_bins(
+            grid_path,
+            slicers,
+            limit_per_category=share_limit_per_category,
+            locked_color_dimension=locked_color_dimension,
+            max_categories=max_share_heatmaps,
+        )
+    elif map_display_mode == PIECHART_COMPOSITION_MODE:
         rows = query.query_composition_markers(
             grid_path,
             slicers,
@@ -553,7 +654,9 @@ def main() -> None:
     else:
         total_records = sum(int(row["record_count"]) for row in rows)
     summary.metric(
-        "Map points" if map_display_mode == PIECHART_COMPOSITION_MODE else "Map bins",
+        "Map points"
+        if map_display_mode in {CATEGORY_SHARE_HEATMAPS_MODE, PIECHART_COMPOSITION_MODE}
+        else "Map bins",
         f"{len(rows):,}",
     )
     if map_display_mode == SHARE_HEATMAP_MODE:
@@ -562,6 +665,19 @@ def main() -> None:
         summary.metric("Visible records", f"{total_records:,}")
     summary.metric("Matching records", f"{matching_records:,}")
     summary.metric("Years", f"{len(years):,}")
+    if map_display_mode == CATEGORY_SHARE_HEATMAPS_MODE:
+        shown_categories = len(rows_by_color_value(rows))
+        summary.metric("Heatmaps", f"{shown_categories:,}")
+        if shown_categories >= max_share_heatmaps:
+            summary.warning(
+                f"Showing the top {max_share_heatmaps:,} active categories by record count. "
+                "Narrow the taxonomy slicers to inspect more categories."
+            )
+        if len(rows) >= shown_categories * share_limit_per_category:
+            summary.warning(
+                "Per-heatmap point cap may be hiding lower-count coordinates. "
+                "Narrow the slicers for more detail."
+            )
     if map_display_mode == PIECHART_COMPOSITION_MODE and total_records < matching_records:
         summary.warning(
             f"Map point cap is hiding {matching_records - total_records:,} matching records. "
@@ -578,7 +694,9 @@ def main() -> None:
             "Increase Max map points or narrow the slicers."
         )
 
-    if map_display_mode == PIECHART_COMPOSITION_MODE:
+    if map_display_mode == CATEGORY_SHARE_HEATMAPS_MODE:
+        render_category_share_heatmaps(rows, st, pdk)
+    elif map_display_mode == PIECHART_COMPOSITION_MODE:
         render_piechart_composition(rows, st, pdk)
     elif map_display_mode == SHARE_HEATMAP_MODE:
         render_share_heatmap(rows, st, pdk)
