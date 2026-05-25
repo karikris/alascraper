@@ -492,6 +492,52 @@ def test_dashboard_precomputes_category_share_heatmap_visual_fields() -> None:
     assert rows[0]["share_percent"] == "25.0%"
 
 
+def test_dashboard_dominant_radius_uses_total_record_count() -> None:
+    assert dashboard.dominant_point_radius(1) == dashboard.DOMINANT_POINT_MIN_RADIUS_PX
+    assert dashboard.dominant_point_radius(10_000) > dashboard.dominant_point_radius(100)
+    assert (
+        dashboard.dominant_point_radius(10_000_000)
+        == dashboard.DOMINANT_POINT_MAX_RADIUS_PX
+    )
+
+
+def test_dashboard_precomputes_dominant_category_visual_fields() -> None:
+    rows = dashboard.add_dominant_category_visual_fields(
+        [
+            {
+                "total_record_count": 100,
+                "color_level": "family",
+                "composition": [
+                    {"value": "Nymphalidae", "record_count": 70, "share": 0.7},
+                    {"value": "Lycaenidae", "record_count": 30, "share": 0.3},
+                ],
+                "composition_text": "Nymphalidae: 70 (70.0%)\nLycaenidae: 30 (30.0%)",
+            },
+            {
+                "total_record_count": 100,
+                "color_level": "family",
+                "composition": [
+                    {"value": "Nymphalidae", "record_count": 25, "share": 0.25},
+                    {"value": "Lycaenidae", "record_count": 75, "share": 0.75},
+                ],
+                "composition_text": "Nymphalidae: 25 (25.0%)\nLycaenidae: 75 (75.0%)",
+            },
+        ]
+    )
+
+    high_share = rows[0]
+    low_share = rows[1]
+
+    assert high_share["dominant_value"] == "Nymphalidae"
+    assert high_share["dominant_record_count"] == 70
+    assert high_share["dominant_share"] == 0.7
+    assert high_share["dominant_share_percent"] == "70.0%"
+    assert high_share["fill_color"][:3] == dashboard.FAMILY_COLORS["Nymphalidae"][:3]
+    assert high_share["radius_pixels"] == dashboard.dominant_point_radius(100)
+    assert high_share["tooltip"].startswith("Dominant family Nymphalidae: 70.0%")
+    assert high_share["fill_color"][3] > low_share["fill_color"][3]
+
+
 def test_dashboard_builds_piechart_icon_visual_fields() -> None:
     rows = dashboard.add_piechart_visual_fields(
         [
@@ -536,8 +582,13 @@ def test_dashboard_map_display_modes_include_piechart_composition() -> None:
     assert dashboard.PIECHART_COMPOSITION_MODE in dashboard.MAP_DISPLAY_MODES
 
 
-def test_dashboard_defaults_to_category_share_heatmaps_mode() -> None:
-    assert dashboard.MAP_DISPLAY_MODES[0] == dashboard.CATEGORY_SHARE_HEATMAPS_MODE
+def test_dashboard_defaults_to_dominant_category_mode() -> None:
+    assert dashboard.MAP_DISPLAY_MODES[0] == dashboard.DOMINANT_CATEGORY_MODE
+
+
+def test_dashboard_compare_category_heatmaps_mode_remains_available() -> None:
+    assert dashboard.CATEGORY_SHARE_HEATMAPS_MODE == "Compare category heatmaps"
+    assert dashboard.CATEGORY_SHARE_HEATMAPS_MODE in dashboard.MAP_DISPLAY_MODES
 
 
 def test_dashboard_map_display_selector_uses_versioned_state_key() -> None:
@@ -549,15 +600,15 @@ def test_dashboard_map_display_selector_uses_versioned_state_key() -> None:
         def selectbox(self, *_args: object, **kwargs: object) -> str:
             self.key = kwargs["key"]
             self.index = kwargs["index"]
-            return dashboard.CATEGORY_SHARE_HEATMAPS_MODE
+            return dashboard.DOMINANT_CATEGORY_MODE
 
     sidebar = FakeSidebar()
 
     selected = dashboard.map_display_selector(sidebar)
 
-    assert selected == dashboard.CATEGORY_SHARE_HEATMAPS_MODE
+    assert selected == dashboard.DOMINANT_CATEGORY_MODE
     assert sidebar.index == 0
-    assert sidebar.key == "map_display_mode_v3"
+    assert sidebar.key == "map_display_mode_v4"
 
 
 def test_dashboard_title_is_butterfly_dashboard() -> None:

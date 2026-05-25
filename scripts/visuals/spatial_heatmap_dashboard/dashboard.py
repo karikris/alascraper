@@ -39,16 +39,20 @@ DEFAULT_SHARE_HEATMAP_POINT_LIMIT = 50_000
 DEFAULT_MAX_SHARE_HEATMAPS = 12
 MAP_HEIGHT_PX = 820
 SHARE_HEATMAP_PANEL_HEIGHT_PX = 320
-CATEGORY_SHARE_HEATMAPS_MODE = "Category share heatmaps"
+DOMINANT_CATEGORY_MODE = "Dominant category map"
+CATEGORY_SHARE_HEATMAPS_MODE = "Compare category heatmaps"
 SINGLE_COLOR_MODE = "Single-color bubbles"
 PIECHART_COMPOSITION_MODE = "Piechart composition markers"
 SHARE_HEATMAP_MODE = "Selected-category share heatmap"
 MAP_DISPLAY_MODES = [
-    CATEGORY_SHARE_HEATMAPS_MODE,
+    DOMINANT_CATEGORY_MODE,
     PIECHART_COMPOSITION_MODE,
+    CATEGORY_SHARE_HEATMAPS_MODE,
     SINGLE_COLOR_MODE,
     SHARE_HEATMAP_MODE,
 ]
+DOMINANT_POINT_MIN_RADIUS_PX = 3
+DOMINANT_POINT_MAX_RADIUS_PX = 18
 PIE_ICON_CANVAS_PX = 128
 PIE_ICON_MIN_SIZE_PX = 2
 PIE_ICON_MAX_SIZE_PX = 6
@@ -67,6 +71,12 @@ FAMILY_COLORS = {
     "Pieridae": [147, 51, 234, 190],
     "Riodinidae": [249, 115, 22, 190],
 }
+COLOR_LEVEL_DISPLAY_NAMES = {
+    "family": "family",
+    "genus": "genus",
+    "species": "species",
+    "scientificName": "scientific name",
+}
 
 
 def stable_color(value: str | None) -> list[int]:
@@ -84,6 +94,15 @@ def map_color(color_level: str | None, color_value: str | None) -> list[int]:
 def point_radius(record_count: int | float | None) -> float:
     count = max(float(record_count or 0), 1.0)
     return min(140_000.0, 18_000.0 + math.sqrt(count) * 4_500.0)
+
+
+def dominant_point_radius(total_record_count: int | float | None) -> int:
+    count = max(float(total_record_count or 0), 1.0)
+    scale = min(math.log10(count) / 7.0, 1.0)
+    radius = DOMINANT_POINT_MIN_RADIUS_PX + scale * (
+        DOMINANT_POINT_MAX_RADIUS_PX - DOMINANT_POINT_MIN_RADIUS_PX
+    )
+    return round(radius)
 
 
 def color_to_hex(color: list[int]) -> str:
@@ -174,6 +193,40 @@ def add_category_share_heatmap_visual_fields(rows: list[dict[str, Any]]) -> list
                 "color": color,
                 "radius": point_radius(row.get("total_cell_records")),
                 "share_percent": f"{float(row.get('share') or 0) * 100:.1f}%",
+            }
+        )
+    return visual_rows
+
+
+def add_dominant_category_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    visual_rows = []
+    for row in rows:
+        color_level = row.get("color_level")
+        composition = row.get("composition") or []
+        dominant = composition[0] if composition else {}
+        dominant_value = dominant.get("value") or "Not supplied"
+        dominant_count = int(dominant.get("record_count") or 0)
+        dominant_share = float(dominant.get("share") or 0)
+        color = map_color(color_level, dominant_value).copy()
+        color[3] = share_alpha(dominant_share)
+        color_level_label = COLOR_LEVEL_DISPLAY_NAMES.get(str(color_level), "category")
+        total_records = int(row.get("total_record_count") or 0)
+        share_percent = f"{dominant_share * 100:.1f}%"
+        visual_rows.append(
+            {
+                **row,
+                "dominant_value": dominant_value,
+                "dominant_record_count": dominant_count,
+                "dominant_share": dominant_share,
+                "dominant_share_percent": share_percent,
+                "fill_color": color,
+                "radius_pixels": dominant_point_radius(total_records),
+                "tooltip": (
+                    f"Dominant {color_level_label} {dominant_value}: "
+                    f"{share_percent} of {total_records:,} records\n"
+                    f"Dominant records: {dominant_count:,}\n"
+                    f"Composition:\n{row.get('composition_text') or ''}"
+                ),
             }
         )
     return visual_rows
@@ -345,7 +398,7 @@ def color_lock_selector(st: Any) -> str | None:
 
 
 def map_display_selector(st: Any) -> str:
-    return st.selectbox("Map display", MAP_DISPLAY_MODES, index=0, key="map_display_mode_v3")
+    return st.selectbox("Map display", MAP_DISPLAY_MODES, index=0, key="map_display_mode_v4")
 
 
 def share_focus_selector(st: Any, options: list[dict[str, Any]]) -> str | None:
@@ -478,6 +531,38 @@ def render_category_share_heatmaps(rows: list[dict[str, Any]], st: Any, pdk: Any
                 },
             )
             column.pydeck_chart(deck, width="stretch", height=SHARE_HEATMAP_PANEL_HEIGHT_PX)
+
+
+def render_dominant_category_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
+    map_rows = add_dominant_category_visual_fields(rows)
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        map_rows,
+        get_position="[lon_bin, lat_bin]",
+        get_radius="radius_pixels",
+        radius_units="pixels",
+        radius_scale=1,
+        radius_min_pixels=DOMINANT_POINT_MIN_RADIUS_PX,
+        radius_max_pixels=DOMINANT_POINT_MAX_RADIUS_PX,
+        get_fill_color="fill_color",
+        get_line_color=[17, 24, 39, 160],
+        line_width_min_pixels=1,
+        pickable=True,
+        stroked=True,
+        opacity=0.9,
+    )
+    deck = pdk.Deck(
+        map_style=CARTO_POSITRON_STYLE,
+        initial_view_state=pdk.ViewState(
+            latitude=-25.3,
+            longitude=134.5,
+            zoom=3.2,
+            pitch=0,
+        ),
+        layers=[layer],
+        tooltip={"text": "{tooltip}"},
+    )
+    st.pydeck_chart(deck, width="stretch", height=MAP_HEIGHT_PX)
 
 
 def render_piechart_composition(rows: list[dict[str, Any]], st: Any, pdk: Any) -> None:
@@ -615,7 +700,14 @@ def main() -> None:
         focus_value = share_focus_selector(max_controls, focus_options)
 
     share_limit_per_category = min(map_point_limit, DEFAULT_SHARE_HEATMAP_POINT_LIMIT)
-    if map_display_mode == CATEGORY_SHARE_HEATMAPS_MODE:
+    if map_display_mode == DOMINANT_CATEGORY_MODE:
+        rows = query.query_composition_markers(
+            grid_path,
+            slicers,
+            limit=map_point_limit,
+            locked_color_dimension=locked_color_dimension,
+        )
+    elif map_display_mode == CATEGORY_SHARE_HEATMAPS_MODE:
         rows = query.query_all_share_heatmap_bins(
             grid_path,
             slicers,
@@ -649,14 +741,17 @@ def main() -> None:
         )
     years = query.year_summary(grid_path, slicers)
     matching_records = query.mapped_record_count(grid_path, slicers)
-    if map_display_mode == PIECHART_COMPOSITION_MODE:
+    if map_display_mode in {DOMINANT_CATEGORY_MODE, PIECHART_COMPOSITION_MODE}:
         total_records = sum(int(row["total_record_count"]) for row in rows)
     else:
         total_records = sum(int(row["record_count"]) for row in rows)
+    point_based_modes = {
+        DOMINANT_CATEGORY_MODE,
+        CATEGORY_SHARE_HEATMAPS_MODE,
+        PIECHART_COMPOSITION_MODE,
+    }
     summary.metric(
-        "Map points"
-        if map_display_mode in {CATEGORY_SHARE_HEATMAPS_MODE, PIECHART_COMPOSITION_MODE}
-        else "Map bins",
+        "Map points" if map_display_mode in point_based_modes else "Map bins",
         f"{len(rows):,}",
     )
     if map_display_mode == SHARE_HEATMAP_MODE:
@@ -678,7 +773,10 @@ def main() -> None:
                 "Per-heatmap point cap may be hiding lower-count coordinates. "
                 "Narrow the slicers for more detail."
             )
-    if map_display_mode == PIECHART_COMPOSITION_MODE and total_records < matching_records:
+    if (
+        map_display_mode in {DOMINANT_CATEGORY_MODE, PIECHART_COMPOSITION_MODE}
+        and total_records < matching_records
+    ):
         summary.warning(
             f"Map point cap is hiding {matching_records - total_records:,} matching records. "
             "Increase Max map points or narrow the slicers."
@@ -694,7 +792,9 @@ def main() -> None:
             "Increase Max map points or narrow the slicers."
         )
 
-    if map_display_mode == CATEGORY_SHARE_HEATMAPS_MODE:
+    if map_display_mode == DOMINANT_CATEGORY_MODE:
+        render_dominant_category_map(rows, st, pdk)
+    elif map_display_mode == CATEGORY_SHARE_HEATMAPS_MODE:
         render_category_share_heatmaps(rows, st, pdk)
     elif map_display_mode == PIECHART_COMPOSITION_MODE:
         render_piechart_composition(rows, st, pdk)
