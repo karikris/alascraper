@@ -634,8 +634,8 @@ def test_dashboard_title_is_butterfly_dashboard() -> None:
     assert dashboard.PAGE_TITLE == "Butterfly Dashboard"
 
 
-def test_dashboard_main_map_height_is_doubled() -> None:
-    assert dashboard.MAP_HEIGHT_PX == 1_640
+def test_dashboard_main_map_height_matches_requested_frame() -> None:
+    assert dashboard.MAP_HEIGHT_PX == 1_230
 
 
 def test_dashboard_uses_fixed_family_palette() -> None:
