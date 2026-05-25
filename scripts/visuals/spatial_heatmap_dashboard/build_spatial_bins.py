@@ -19,6 +19,10 @@ DEFAULT_GRID_DECIMALS = 2
 CONSERVATION_COLUMNS = [
     "Status",
     "state_status",
+    "state_status_level",
+    "state_status_for_occurrence",
+    "state_status_jurisdiction_matched",
+    "state_status_qualifier",
     "epbc_listed_taxon",
     "state_listed_taxon",
     "epbc_sprat_url",
@@ -124,6 +128,7 @@ def dimension_values(lazy_frame: pl.LazyFrame, mapped_row_count: int) -> dict[st
     schema = lazy_frame.collect_schema()
     status_values = []
     state_status_values = []
+    state_status_level_values = []
     if "Status" in schema:
         status_values = lazy_frame.select(
             pl.col("Status").drop_nulls().unique().sort()
@@ -131,6 +136,10 @@ def dimension_values(lazy_frame: pl.LazyFrame, mapped_row_count: int) -> dict[st
     if "state_status" in schema:
         state_status_values = lazy_frame.select(
             pl.col("state_status").drop_nulls().unique().sort()
+        ).collect().to_series().to_list()
+    if "state_status_level" in schema:
+        state_status_level_values = lazy_frame.select(
+            pl.col("state_status_level").drop_nulls().unique().sort()
         ).collect().to_series().to_list()
     return {
         "built_at_utc": utc_timestamp(),
@@ -143,6 +152,7 @@ def dimension_values(lazy_frame: pl.LazyFrame, mapped_row_count: int) -> dict[st
         "state_values": state_values,
         "status_values": status_values,
         "state_status_values": state_status_values,
+        "state_status_level_values": state_status_level_values,
         "year_values": year_values,
         "min_year": row["min_year"],
         "max_year": row["max_year"],

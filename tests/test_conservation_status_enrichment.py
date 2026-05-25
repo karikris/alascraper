@@ -192,6 +192,9 @@ def test_enrichment_adds_epbc_state_and_match_provenance_columns(tmp_path: Path)
     assert rows["2"]["state_status"] == "Endangered"
     assert rows["3"]["Status"] is None
     assert rows["3"]["state_status"] == "NSW: Critically Endangered; QLD: Vulnerable"
+    assert rows["3"]["state_status_level"] == "Vulnerable"
+    assert rows["3"]["state_status_for_occurrence"] == "QLD: Vulnerable"
+    assert rows["3"]["state_status_jurisdiction_matched"] == "QLD"
     assert rows["3"]["state_match_type"] == "species"
     assert rows["4"]["Status"] == "Vulnerable"
     assert rows["4"]["epbc_listed_taxon"] == "Hesperilla munionga larana"

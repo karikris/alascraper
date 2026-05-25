@@ -92,6 +92,69 @@ def write_precision_fixture(path: Path) -> None:
     ).write_parquet(path)
 
 
+def write_conservation_grid_fixture(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "lat_bin": [-33.5, -37.7, -27.5, -37.8],
+            "lon_bin": [150.1, 145.2, 152.7, 144.9],
+            "family": ["Lycaenidae", "Lycaenidae", "Lycaenidae", "Nymphalidae"],
+            "genus": ["Paralucia", "Paralucia", "Hypochrysops", "Junonia"],
+            "species": [
+                "Paralucia spinifera",
+                "Paralucia pyrodiscus",
+                "Hypochrysops piceatus",
+                "Junonia villida",
+            ],
+            "scientificName": [
+                "Paralucia spinifera",
+                "Paralucia pyrodiscus lucida",
+                "Hypochrysops piceatus",
+                "Junonia villida",
+            ],
+            "stateProvince": ["New South Wales", "Victoria", "Queensland", "Victoria"],
+            "year": [2020, 2020, 2021, 2021],
+            "record_count": [5, 3, 2, 20],
+            "distinct_scientific_names": [1, 1, 1, 1],
+            "distinct_taxon_concepts": [1, 1, 1, 1],
+            "min_year": [2020, 2020, 2021, 2021],
+            "max_year": [2020, 2020, 2021, 2021],
+            "Status": ["Vulnerable", "Endangered", "Critically Endangered", None],
+            "state_status": [
+                "NSW: Endangered",
+                "VIC: Endangered",
+                "QLD: Critically Endangered",
+                None,
+            ],
+            "state_status_level": ["Endangered", "Endangered", "Critically Endangered", None],
+            "state_status_for_occurrence": [
+                "NSW: Endangered",
+                "VIC: Endangered",
+                "QLD: Critically Endangered",
+                None,
+            ],
+            "state_status_jurisdiction_matched": ["NSW", "VIC", "QLD", None],
+            "state_status_qualifier": [None, None, None, None],
+            "epbc_listed_taxon": [
+                "Paralucia spinifera",
+                "Paralucia pyrodiscus lucida",
+                "Hypochrysops piceatus",
+                None,
+            ],
+            "state_listed_taxon": [
+                "Paralucia spinifera",
+                "Paralucia pyrodiscus lucida",
+                "Hypochrysops piceatus",
+                None,
+            ],
+            "epbc_sprat_url": ["https://example.test/s1", None, None, None],
+            "epbc_conservation_advice_url": [None, None, None, None],
+            "epbc_recovery_plan_url": [None, None, None, None],
+            "epbc_protected_matters_url": [None, None, None, None],
+        }
+    ).write_parquet(path)
+
+
 def test_build_grid_bins_excludes_null_coordinates_and_aggregates(
     tmp_path: Path,
 ) -> None:
@@ -207,6 +270,84 @@ def test_query_grid_bins_applies_include_exclude_and_year_range(
     assert {row["color_value"] for row in rows} == {"Alpha one"}
     assert sum(row["record_count"] for row in rows) == 2
     assert query.mapped_record_count(outputs.grid_bins, filters) == 2
+
+
+def test_query_filters_national_status_and_colors_by_species(tmp_path: Path) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_conservation_grid_fixture(grid)
+    filters = query.SlicerState(
+        conservation_scope="national",
+        include_conservation_statuses=["Endangered"],
+    )
+
+    rows = query.query_grid_bins(grid, filters)
+
+    assert [(row["species"], row["record_count"]) for row in rows] == [
+        ("Paralucia pyrodiscus", 3)
+    ]
+    assert {row["color_level"] for row in rows} == {"species"}
+    assert {row["color_value"] for row in rows} == {"Paralucia pyrodiscus"}
+
+
+def test_query_filters_state_status_level_and_colors_by_species(tmp_path: Path) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_conservation_grid_fixture(grid)
+    filters = query.SlicerState(
+        conservation_scope="state",
+        include_conservation_statuses=["Endangered"],
+    )
+
+    rows = query.query_grid_bins(grid, filters)
+
+    assert [(row["species"], row["record_count"]) for row in rows] == [
+        ("Paralucia spinifera", 5),
+        ("Paralucia pyrodiscus", 3),
+    ]
+    assert {row["color_level"] for row in rows} == {"species"}
+    assert {row["color_value"] for row in rows} == {
+        "Paralucia spinifera",
+        "Paralucia pyrodiscus",
+    }
+
+
+def test_conservation_filter_survives_coordinate_precision_aggregation(
+    tmp_path: Path,
+) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_conservation_grid_fixture(grid)
+    filters = query.SlicerState(
+        conservation_scope="national",
+        include_conservation_statuses=["Vulnerable"],
+    )
+
+    rows = query.query_composition_markers(grid, filters, coordinate_decimals=1)
+
+    assert rows == [
+        {
+            "lat_bin": -33.5,
+            "lon_bin": 150.1,
+            "total_record_count": 5,
+            "color_level": "species",
+            "composition": [
+                {"value": "Paralucia spinifera", "record_count": 5, "share": 1.0}
+            ],
+            "composition_text": "Paralucia spinifera: 5 (100.0%)",
+        }
+    ]
+
+
+def test_option_values_include_conservation_status_options(tmp_path: Path) -> None:
+    grid = tmp_path / "grid.parquet"
+    write_conservation_grid_fixture(grid)
+
+    options = query.option_values(grid, query.SlicerState())
+
+    assert options["national_statuses"] == [
+        "Critically Endangered",
+        "Endangered",
+        "Vulnerable",
+    ]
+    assert options["state_status_levels"] == ["Critically Endangered", "Endangered"]
 
 
 def test_color_value_options_returns_active_color_values_by_count(tmp_path: Path) -> None:
@@ -767,6 +908,48 @@ def test_dashboard_coordinate_precision_selector_defaults_to_regional() -> None:
     assert sidebar.key == "coordinate_precision_v1"
 
 
+def test_dashboard_conservation_selector_returns_scope_and_statuses() -> None:
+    class FakeSidebar:
+        def selectbox(self, _label: str, options: list[str], **_kwargs: object) -> str:
+            assert options == ["National EPBC", "State / territory"]
+            return "State / territory"
+
+        def multiselect(self, _label: str, values: list[str], **_kwargs: object) -> list[str]:
+            assert values == ["Critically Endangered", "Endangered"]
+            return ["Endangered"]
+
+    scope, statuses = dashboard.conservation_selector(
+        {
+            "national_statuses": ["Endangered", "Vulnerable"],
+            "state_status_levels": ["Critically Endangered", "Endangered"],
+        },
+        FakeSidebar(),
+    )
+
+    assert scope == "state"
+    assert statuses == ["Endangered"]
+
+
+def test_dashboard_conservation_selector_is_inactive_without_status_selection() -> None:
+    class FakeSidebar:
+        def selectbox(self, *_args: object, **_kwargs: object) -> str:
+            return "National EPBC"
+
+        def multiselect(self, *_args: object, **_kwargs: object) -> list[str]:
+            return []
+
+    scope, statuses = dashboard.conservation_selector(
+        {
+            "national_statuses": ["Endangered", "Vulnerable"],
+            "state_status_levels": ["Critically Endangered", "Endangered"],
+        },
+        FakeSidebar(),
+    )
+
+    assert scope is None
+    assert statuses == []
+
+
 def test_dashboard_title_is_butterfly_dashboard() -> None:
     assert dashboard.PAGE_TITLE == "Butterfly Dashboard"
 
@@ -812,6 +995,15 @@ def test_query_color_dimension_can_be_locked() -> None:
         == "scientificName"
     )
     assert query.color_dimension(filters, locked_color_dimension="unknown") == "scientificName"
+
+
+def test_query_conservation_filter_forces_species_color_over_lock() -> None:
+    filters = query.SlicerState(
+        conservation_scope="national",
+        include_conservation_statuses=["Endangered"],
+    )
+
+    assert query.color_dimension(filters, locked_color_dimension="family") == "species"
 
 
 def test_query_grid_bins_uses_locked_color_dimension(tmp_path: Path) -> None:

@@ -21,6 +21,8 @@ class SlicerState:
     exclude_states: list[str] = field(default_factory=list)
     year_min: int | None = None
     year_max: int | None = None
+    conservation_scope: str | None = None
+    include_conservation_statuses: list[str] = field(default_factory=list)
 
 
 FILTER_COLUMNS = {
@@ -30,6 +32,21 @@ FILTER_COLUMNS = {
     "stateProvince": ("include_states", "exclude_states"),
 }
 COLOR_DIMENSIONS = ("family", "genus", "species", "scientificName")
+CONSERVATION_SCOPES = {"national", "state"}
+CONSERVATION_QUERY_COLUMNS = (
+    "Status",
+    "state_status",
+    "state_status_level",
+    "state_status_for_occurrence",
+    "state_status_jurisdiction_matched",
+    "state_status_qualifier",
+    "epbc_listed_taxon",
+    "state_listed_taxon",
+    "epbc_sprat_url",
+    "epbc_conservation_advice_url",
+    "epbc_recovery_plan_url",
+    "epbc_protected_matters_url",
+)
 TAXONOMY_FILTERS = (
     ("species", "include_species", "exclude_species", "scientificName"),
     ("genus", "include_genera", "exclude_genera", "species"),
@@ -71,6 +88,12 @@ def coordinate_source_sql(
         return source
 
     decimals = max(int(coordinate_decimals), 0)
+    columns = parquet_columns(grid_path)
+    conservation_selects = [
+        column if column in columns else f"NULL AS {column}"
+        for column in CONSERVATION_QUERY_COLUMNS
+    ]
+    group_count = 8 + len(conservation_selects)
     return f"""
         (
             SELECT
@@ -82,15 +105,27 @@ def coordinate_source_sql(
                 scientificName,
                 year,
                 stateProvince,
+                {", ".join(conservation_selects)},
                 SUM(record_count) AS record_count,
                 SUM(distinct_scientific_names) AS distinct_scientific_names,
                 SUM(distinct_taxon_concepts) AS distinct_taxon_concepts,
                 MIN(min_year) AS min_year,
                 MAX(max_year) AS max_year
             FROM {source}
-            GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+            GROUP BY {", ".join(str(index) for index in range(1, group_count + 1))}
         )
     """
+
+
+def parquet_columns(grid_path: Path) -> set[str]:
+    con = duckdb.connect(":memory:")
+    try:
+        rows = con.execute(
+            f"DESCRIBE SELECT * FROM read_parquet({sql_string(Path(grid_path).as_posix())})"
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+    finally:
+        con.close()
 
 
 def value_list(values: list[str]) -> str:
@@ -116,6 +151,19 @@ def filter_clauses(filters: SlicerState, *, skip_column: str | None = None) -> l
         if filters.year_max is not None:
             clauses.append(f"year <= {int(filters.year_max)}")
 
+    if (
+        skip_column != "conservation"
+        and filters.conservation_scope in CONSERVATION_SCOPES
+        and filters.include_conservation_statuses
+    ):
+        if filters.conservation_scope == "national":
+            clauses.append(f"Status IN {value_list(filters.include_conservation_statuses)}")
+        else:
+            clauses.append(
+                "state_status_level "
+                f"IN {value_list(filters.include_conservation_statuses)}"
+            )
+
     return clauses
 
 
@@ -128,6 +176,8 @@ def color_dimension(
     filters: SlicerState,
     locked_color_dimension: str | None = None,
 ) -> str:
+    if filters.conservation_scope in CONSERVATION_SCOPES and filters.include_conservation_statuses:
+        return "species"
     if locked_color_dimension in COLOR_DIMENSIONS:
         return locked_color_dimension
     for _, include_attr, exclude_attr, dimension in TAXONOMY_FILTERS:
@@ -611,7 +661,12 @@ def option_values(grid_path: Path, filters: SlicerState) -> dict[str, list[Any]]
             ("species", "species"),
             ("states", "stateProvince"),
             ("years", "year"),
+            ("national_statuses", "Status"),
+            ("state_status_levels", "state_status_level"),
         ):
+            if column not in parquet_columns(grid_path):
+                options[output_key] = []
+                continue
             where = where_sql(filters)
             rows = con.execute(
                 f"""

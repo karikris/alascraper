@@ -83,6 +83,14 @@ COLOR_LEVEL_LABELS = {
     "Species": "species",
     "Scientific name": "scientificName",
 }
+CONSERVATION_SCOPE_LABELS = {
+    "National EPBC": "national",
+    "State / territory": "state",
+}
+CONSERVATION_OPTION_KEYS = {
+    "national": "national_statuses",
+    "state": "state_status_levels",
+}
 COORDINATE_PRECISION_LEVELS = {
     "Regional": 1,
     "Local": 2,
@@ -418,6 +426,28 @@ def coordinate_precision_selector(st: Any) -> int:
     return COORDINATE_PRECISION_LEVELS[selected_label]
 
 
+def conservation_selector(
+    options: dict[str, list[Any]],
+    st: Any,
+) -> tuple[str | None, list[str]]:
+    selected_label = st.selectbox(
+        "Listing authority",
+        list(CONSERVATION_SCOPE_LABELS),
+        key="conservation_scope_v1",
+    )
+    scope = CONSERVATION_SCOPE_LABELS[selected_label]
+    option_key = CONSERVATION_OPTION_KEYS[scope]
+    statuses = [str(value) for value in options.get(option_key, []) if value is not None]
+    selected_statuses = st.multiselect(
+        "Conservation status",
+        statuses,
+        key="conservation_status_values_v1",
+    )
+    if not selected_statuses:
+        return None, []
+    return scope, selected_statuses
+
+
 def query_with_coordinate_precision(
     query_function: Any,
     *args: Any,
@@ -687,6 +717,7 @@ def main() -> None:
     family_controls = st.sidebar.container()
     genus_controls = st.sidebar.container()
     species_controls = st.sidebar.container()
+    conservation_controls = st.sidebar.container()
     state_controls = st.sidebar.container()
     year_controls = st.sidebar.container()
     display_controls = st.sidebar.container()
@@ -707,40 +738,96 @@ def main() -> None:
         if map_display_mode == CATEGORY_SHARE_HEATMAPS_MODE
         else DEFAULT_MAX_SHARE_HEATMAPS
     )
-    partial_slicers = build_partial_slicer_state(
+    conservation_scope, conservation_statuses = conservation_selector(
         base_options,
-        family_controls,
-        state_controls,
-        year_controls,
-        st.session_state,
+        conservation_controls,
     )
-    genus_options = query.option_values(grid_path, partial_slicers)["genera"]
+    conservation_slicers = query.SlicerState(
+        conservation_scope=conservation_scope,
+        include_conservation_statuses=conservation_statuses,
+    )
+    family_options = query.option_values(grid_path, conservation_slicers)["families"]
+    include_families, exclude_families = filter_mode(
+        "Family",
+        family_options,
+        family_controls,
+    )
+    family_slicers = query.SlicerState(
+        include_families=include_families,
+        exclude_families=exclude_families,
+        conservation_scope=conservation_scope,
+        include_conservation_statuses=conservation_statuses,
+    )
+    genus_options = query.option_values(grid_path, family_slicers)["genera"]
     include_genera, exclude_genera = filter_mode("Genus", genus_options, genus_controls)
     genus_slicers = query.SlicerState(
-        include_families=partial_slicers.include_families,
-        exclude_families=partial_slicers.exclude_families,
+        include_families=include_families,
+        exclude_families=exclude_families,
         include_genera=include_genera,
         exclude_genera=exclude_genera,
-        include_states=partial_slicers.include_states,
-        exclude_states=partial_slicers.exclude_states,
-        year_min=partial_slicers.year_min,
-        year_max=partial_slicers.year_max,
+        conservation_scope=conservation_scope,
+        include_conservation_statuses=conservation_statuses,
     )
     species_options = query.option_values(grid_path, genus_slicers)["species"]
     include_species, exclude_species = filter_mode("Species", species_options, species_controls)
-    show_year_comparison = display_controls.checkbox("Show year comparison", value=False)
-    show_filtered_rows = display_controls.checkbox("Show filtered rows", value=False)
-    slicers = query.SlicerState(
-        include_families=partial_slicers.include_families,
-        exclude_families=partial_slicers.exclude_families,
+    species_slicers = query.SlicerState(
+        include_families=include_families,
+        exclude_families=exclude_families,
         include_genera=include_genera,
         exclude_genera=exclude_genera,
         include_species=include_species,
         exclude_species=exclude_species,
-        include_states=partial_slicers.include_states,
-        exclude_states=partial_slicers.exclude_states,
-        year_min=partial_slicers.year_min,
-        year_max=partial_slicers.year_max,
+        conservation_scope=conservation_scope,
+        include_conservation_statuses=conservation_statuses,
+    )
+    state_options = query.option_values(grid_path, species_slicers)["states"]
+    include_states, exclude_states = state_selector(
+        state_options,
+        state_controls,
+        st.session_state,
+    )
+    state_slicers = query.SlicerState(
+        include_families=include_families,
+        exclude_families=exclude_families,
+        include_genera=include_genera,
+        exclude_genera=exclude_genera,
+        include_species=include_species,
+        exclude_species=exclude_species,
+        include_states=include_states,
+        exclude_states=exclude_states,
+        conservation_scope=conservation_scope,
+        include_conservation_statuses=conservation_statuses,
+    )
+    year_options = query.option_values(grid_path, state_slicers)["years"]
+    years_for_slider = [int(year) for year in year_options if year is not None]
+    year_min = min(years_for_slider) if years_for_slider else None
+    year_max = max(years_for_slider) if years_for_slider else None
+    selected_range = year_controls.slider(
+        "Year range",
+        min_value=year_min or 0,
+        max_value=year_max or 0,
+        value=(year_min or 0, year_max or 0),
+        disabled=not years_for_slider,
+    )
+    active_year_min, active_year_max = active_year_bounds(
+        years_for_slider,
+        selected_range,
+    )
+    show_year_comparison = display_controls.checkbox("Show year comparison", value=False)
+    show_filtered_rows = display_controls.checkbox("Show filtered rows", value=False)
+    slicers = query.SlicerState(
+        include_families=include_families,
+        exclude_families=exclude_families,
+        include_genera=include_genera,
+        exclude_genera=exclude_genera,
+        include_species=include_species,
+        exclude_species=exclude_species,
+        include_states=include_states,
+        exclude_states=exclude_states,
+        year_min=active_year_min,
+        year_max=active_year_max,
+        conservation_scope=conservation_scope,
+        include_conservation_statuses=conservation_statuses,
     )
     filtered_options = query.option_values(grid_path, slicers)
     summary.subheader("Summary statistics")

@@ -57,6 +57,10 @@ CONSERVATION_OUTPUT_COLUMNS = [
     "epbc_notes",
     "state_status",
     "state_status_jurisdiction",
+    "state_status_level",
+    "state_status_for_occurrence",
+    "state_status_jurisdiction_matched",
+    "state_status_qualifier",
     "state_listed_taxon",
     "state_common_name",
     "state_source_url",
@@ -72,6 +76,36 @@ OUTPUT_SCHEMA = {
     column: pl.Float64 if column in FLOAT_OUTPUT_COLUMNS else pl.String
     for column in CONSERVATION_OUTPUT_COLUMNS
 }
+STATE_PROVINCE_CODES = {
+    "Australian Capital Territory": "ACT",
+    "New South Wales": "NSW",
+    "Northern Territory": "NT",
+    "Queensland": "QLD",
+    "South Australia": "SA",
+    "Tasmania": "TAS",
+    "Victoria": "VIC",
+    "Western Australia": "WA",
+    "ACT": "ACT",
+    "NSW": "NSW",
+    "NT": "NT",
+    "QLD": "QLD",
+    "SA": "SA",
+    "TAS": "TAS",
+    "VIC": "VIC",
+    "WA": "WA",
+}
+STATE_STATUS_COLUMNS = [
+    "state_status_level",
+    "state_status_for_occurrence",
+    "state_status_jurisdiction_matched",
+    "state_status_qualifier",
+]
+STATE_STATUS_LEVELS = (
+    "Critically Endangered",
+    "Endangered",
+    "Vulnerable",
+    "Rare",
+)
 
 
 @dataclass(frozen=True)
@@ -122,6 +156,72 @@ def split_match_names(reference_row: dict[str, Any]) -> list[str]:
         if cleaned:
             values.append(cleaned)
     return list(dict.fromkeys(values))
+
+
+def status_level_and_qualifier(status_text: str | None) -> tuple[str | None, str | None]:
+    status = clean_text(status_text)
+    if not status:
+        return None, None
+    for level in STATE_STATUS_LEVELS:
+        if status == level:
+            return level, None
+        if status.startswith(level):
+            qualifier = clean_text(status[len(level) :].strip(" -;"))
+            return level, qualifier
+    return status, None
+
+
+def parse_state_status_entries(state_status: Any) -> list[dict[str, str | None]]:
+    text = clean_text(state_status)
+    if not text:
+        return []
+    entries = []
+    for part in text.split(";"):
+        entry = clean_text(part)
+        if not entry:
+            continue
+        jurisdiction = None
+        status_text = entry
+        if ":" in entry:
+            jurisdiction_text, status_text = entry.split(":", 1)
+            jurisdiction = clean_text(jurisdiction_text)
+            status_text = clean_text(status_text) or ""
+        level, qualifier = status_level_and_qualifier(status_text)
+        entries.append(
+            {
+                "jurisdiction": jurisdiction,
+                "status_text": status_text,
+                "status_level": level,
+                "qualifier": qualifier,
+            }
+        )
+    return entries
+
+
+def state_status_info(state_province: Any, state_status: Any) -> dict[str, str | None]:
+    state_name = clean_text(state_province)
+    state_code = STATE_PROVINCE_CODES.get(state_name or "")
+    entries = parse_state_status_entries(state_status)
+    matching_entries = [
+        entry
+        for entry in entries
+        if entry["jurisdiction"] is None or entry["jurisdiction"] == state_code
+    ]
+    if not matching_entries:
+        return {column: None for column in STATE_STATUS_COLUMNS}
+
+    entry = matching_entries[0]
+    jurisdiction = entry["jurisdiction"] or state_code
+    status_text = entry["status_text"]
+    status_for_occurrence = (
+        f"{jurisdiction}: {status_text}" if jurisdiction and status_text else status_text
+    )
+    return {
+        "state_status_level": entry["status_level"],
+        "state_status_for_occurrence": status_for_occurrence,
+        "state_status_jurisdiction_matched": jurisdiction,
+        "state_status_qualifier": entry["qualifier"],
+    }
 
 
 def match_confidence(match_field: str, *, synonym: bool) -> float:
@@ -195,6 +295,7 @@ def field_match_frame(
         source_frame.select(
             [
                 "_occurrence_row",
+                "stateProvince",
                 pl.col(field).cast(pl.String).str.strip_chars().alias("match_name"),
             ]
         )
@@ -231,6 +332,17 @@ def build_annotation_frame(
         keep="first",
         maintain_order=True,
     )
+    state_status_frame = pl.DataFrame(
+        [
+            state_status_info(row["stateProvince"], row["state_status"])
+            for row in best_matches.select(["stateProvince", "state_status"]).iter_rows(
+                named=True
+            )
+        ],
+        schema={column: pl.String for column in STATE_STATUS_COLUMNS},
+        orient="row",
+    )
+    best_matches = pl.concat([best_matches, state_status_frame], how="horizontal")
     annotated_matches = best_matches.with_columns(
         [
             match_type_expr().alias("_match_type"),
@@ -307,35 +419,39 @@ def build_annotation_frame(
             .then(pl.col("state_status_jurisdiction"))
             .otherwise(None)
             .alias("state_status_jurisdiction"),
-            pl.when(pl.col("state_status").is_not_null())
+            pl.col("state_status_level"),
+            pl.col("state_status_for_occurrence"),
+            pl.col("state_status_jurisdiction_matched"),
+            pl.col("state_status_qualifier"),
+            pl.when(pl.col("state_status_level").is_not_null())
             .then(pl.col("accepted_taxon"))
             .otherwise(None)
             .alias("state_listed_taxon"),
-            pl.when(pl.col("state_status").is_not_null())
+            pl.when(pl.col("state_status_level").is_not_null())
             .then(pl.col("common_name"))
             .otherwise(None)
             .alias("state_common_name"),
-            pl.when(pl.col("state_status").is_not_null())
+            pl.when(pl.col("state_status_level").is_not_null())
             .then(pl.col("state_source_url"))
             .otherwise(None)
             .alias("state_source_url"),
-            pl.when(pl.col("state_status").is_not_null())
+            pl.when(pl.col("state_status_level").is_not_null())
             .then(pl.col("source_date"))
             .otherwise(None)
             .alias("state_source_date"),
-            pl.when(pl.col("state_status").is_not_null())
+            pl.when(pl.col("state_status_level").is_not_null())
             .then(pl.col("_match_type"))
             .otherwise(None)
             .alias("state_match_type"),
-            pl.when(pl.col("state_status").is_not_null())
+            pl.when(pl.col("state_status_level").is_not_null())
             .then(pl.col("match_name"))
             .otherwise(None)
             .alias("state_match_name"),
-            pl.when(pl.col("state_status").is_not_null())
+            pl.when(pl.col("state_status_level").is_not_null())
             .then(pl.col("_match_confidence"))
             .otherwise(None)
             .alias("state_match_confidence"),
-            pl.when(pl.col("state_status").is_not_null())
+            pl.when(pl.col("state_status_level").is_not_null())
             .then(pl.col("notes"))
             .otherwise(None)
             .alias("state_notes"),
@@ -484,7 +600,7 @@ def enrich_conservation_status(
     enriched.write_parquet(output)
 
     epbc_matched_rows = int(annotation_frame["Status"].is_not_null().sum())
-    state_matched_rows = int(annotation_frame["state_status"].is_not_null().sum())
+    state_matched_rows = int(annotation_frame["state_status_level"].is_not_null().sum())
     report = Path(report_path) if report_path else None
     if report is not None:
         write_report(
