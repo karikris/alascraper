@@ -37,7 +37,7 @@ CARTO_POSITRON_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style
 DEFAULT_MAP_POINT_LIMIT = 250_000
 DEFAULT_SHARE_HEATMAP_POINT_LIMIT = 50_000
 DEFAULT_MAX_SHARE_HEATMAPS = 12
-MAP_HEIGHT_PX = 820
+MAP_HEIGHT_PX = 1_640
 SHARE_HEATMAP_PANEL_HEIGHT_PX = 320
 DOMINANT_CATEGORY_MODE = "Dominant category map"
 CATEGORY_SHARE_HEATMAPS_MODE = "Compare category heatmaps"
@@ -53,22 +53,22 @@ MAP_DISPLAY_MODES = [
 ]
 DOMINANT_POINT_RADIUS_SCALE: tuple[tuple[int, int], ...] = (
     (1, 3),
-    (10, 4),
-    (25, 5),
-    (50, 6),
-    (100, 7),
-    (250, 8),
-    (500, 9),
-    (750, 10),
-    (1_000, 11),
-    (2_500, 12),
-    (5_000, 14),
-    (7_500, 16),
-    (10_000, 18),
-    (15_000, 20),
-    (20_000, 22),
-    (25_000, 24),
-    (50_000, 26),
+    (10, 5),
+    (25, 6),
+    (50, 7),
+    (100, 8),
+    (250, 9),
+    (500, 10),
+    (750, 11),
+    (1_000, 12),
+    (2_500, 14),
+    (5_000, 16),
+    (7_500, 18),
+    (10_000, 20),
+    (15_000, 22),
+    (20_000, 24),
+    (25_000, 26),
+    (50_000, 28),
 )
 DOMINANT_POINT_MIN_RADIUS_PX = DOMINANT_POINT_RADIUS_SCALE[0][1]
 DOMINANT_POINT_MAX_RADIUS_PX = DOMINANT_POINT_RADIUS_SCALE[-1][1]

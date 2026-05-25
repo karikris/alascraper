@@ -495,29 +495,29 @@ def test_dashboard_precomputes_category_share_heatmap_visual_fields() -> None:
 def test_dashboard_dominant_radius_uses_total_record_count() -> None:
     expected_radii = {
         1: 3,
-        10: 4,
-        25: 5,
-        50: 6,
-        100: 7,
-        250: 8,
-        500: 9,
-        750: 10,
-        1_000: 11,
-        2_500: 12,
-        5_000: 14,
-        7_500: 16,
-        10_000: 18,
-        15_000: 20,
-        20_000: 22,
-        25_000: 24,
-        50_000: 26,
+        10: 5,
+        25: 6,
+        50: 7,
+        100: 8,
+        250: 9,
+        500: 10,
+        750: 11,
+        1_000: 12,
+        2_500: 14,
+        5_000: 16,
+        7_500: 18,
+        10_000: 20,
+        15_000: 22,
+        20_000: 24,
+        25_000: 26,
+        50_000: 28,
     }
 
     for record_count, radius in expected_radii.items():
         assert dashboard.dominant_point_radius(record_count) == radius
 
-    assert dashboard.dominant_point_radius(6_250) == 15
-    assert dashboard.dominant_point_radius(100_000) == 26
+    assert dashboard.dominant_point_radius(6_250) == 17
+    assert dashboard.dominant_point_radius(100_000) == 28
 
 
 def test_dashboard_precomputes_dominant_category_visual_fields() -> None:
@@ -632,6 +632,10 @@ def test_dashboard_map_display_selector_uses_versioned_state_key() -> None:
 
 def test_dashboard_title_is_butterfly_dashboard() -> None:
     assert dashboard.PAGE_TITLE == "Butterfly Dashboard"
+
+
+def test_dashboard_main_map_height_is_doubled() -> None:
+    assert dashboard.MAP_HEIGHT_PX == 1_640
 
 
 def test_dashboard_uses_fixed_family_palette() -> None:
