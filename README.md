@@ -248,6 +248,28 @@ Run without notes prompts for batch/test use:
 .venv/bin/python scripts/cleaning/profile_family_parquet.py --class Aves --no-interactive
 ```
 
+Enrich the cleaned butterfly parquet with EPBC and state/territory
+conservation-status fields:
+
+```bash
+.venv/bin/python scripts/cleaning/enrich_butterfly_conservation_status.py
+```
+
+The enrichment script reads
+`datasets/insecta/lepidoptera/butterflies_cleaned.parquet`, applies the curated
+reference table in `data/reference/butterfly_conservation_status.csv`, and
+writes:
+
+```text
+datasets/insecta/lepidoptera/butterflies_conservation.parquet
+datasets/insecta/lepidoptera/quality_reports/butterflies_conservation_status_report.json
+```
+
+`Status` stores the EPBC Act status. State and territory listings are kept in
+`state_status` and companion source/provenance columns. Matching is exact on
+`scientificName`, then exact on `species`, then against synonyms listed in the
+reference table.
+
 Per-family report outputs:
 
 ```text

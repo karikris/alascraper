@@ -135,6 +135,49 @@ def test_build_spatial_bins_defaults_to_local_coordinate_precision() -> None:
     assert bins.DEFAULT_GRID_DECIMALS == 2
 
 
+def test_build_grid_bins_carries_conservation_status_columns(tmp_path: Path) -> None:
+    source = tmp_path / "butterflies_conservation.parquet"
+    out_dir = tmp_path / "dashboard"
+    pl.DataFrame(
+        {
+            "uuid": ["1", "2"],
+            "family": ["Lycaenidae", "Nymphalidae"],
+            "genus": ["Paralucia", "Junonia"],
+            "species": ["Paralucia spinifera", "Junonia villida"],
+            "scientificName": ["Paralucia spinifera", "Junonia villida"],
+            "taxonConceptID": ["t1", "t2"],
+            "stateProvince": ["New South Wales", "Victoria"],
+            "year": [2020, 2021],
+            "decimalLatitude": [-33.5, -37.8],
+            "decimalLongitude": [150.1, 144.9],
+            "Status": ["Vulnerable", None],
+            "state_status": ["NSW: Endangered", None],
+            "epbc_listed_taxon": ["Paralucia spinifera", None],
+            "state_listed_taxon": ["Paralucia spinifera", None],
+            "epbc_sprat_url": ["https://example.test/sprat", None],
+            "epbc_conservation_advice_url": [None, None],
+            "epbc_recovery_plan_url": [None, None],
+            "epbc_protected_matters_url": [None, None],
+        }
+    ).write_parquet(source)
+
+    outputs = bins.build_spatial_bins(
+        source_path=source,
+        output_dir=out_dir,
+        grid_decimals=1,
+    )
+    grid = pl.read_parquet(outputs.grid_bins)
+
+    assert set(bins.CONSERVATION_COLUMNS).issubset(set(grid.columns))
+    listed = grid.filter(pl.col("scientificName") == "Paralucia spinifera").row(
+        0,
+        named=True,
+    )
+    assert listed["Status"] == "Vulnerable"
+    assert listed["state_status"] == "NSW: Endangered"
+    assert listed["epbc_listed_taxon"] == "Paralucia spinifera"
+
+
 def test_query_grid_bins_applies_include_exclude_and_year_range(
     tmp_path: Path,
 ) -> None:

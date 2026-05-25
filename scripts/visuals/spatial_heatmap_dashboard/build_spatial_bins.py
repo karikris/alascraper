@@ -13,9 +13,19 @@ from typing import Any
 import polars as pl
 
 
-DEFAULT_SOURCE_PATH = Path("datasets/insecta/lepidoptera/butterflies_cleaned.parquet")
+DEFAULT_SOURCE_PATH = Path("datasets/insecta/lepidoptera/butterflies_conservation.parquet")
 DEFAULT_OUTPUT_DIR = Path("datasets/insecta/lepidoptera/dashboard")
 DEFAULT_GRID_DECIMALS = 2
+CONSERVATION_COLUMNS = [
+    "Status",
+    "state_status",
+    "epbc_listed_taxon",
+    "state_listed_taxon",
+    "epbc_sprat_url",
+    "epbc_conservation_advice_url",
+    "epbc_recovery_plan_url",
+    "epbc_protected_matters_url",
+]
 
 
 @dataclass(frozen=True)
@@ -44,6 +54,18 @@ def spatial_source(lazy_frame: pl.LazyFrame, grid_decimals: int) -> pl.LazyFrame
     )
 
 
+def with_conservation_columns(lazy_frame: pl.LazyFrame) -> pl.LazyFrame:
+    schema = lazy_frame.collect_schema()
+    missing_columns = [
+        pl.lit(None, dtype=pl.String).alias(column)
+        for column in CONSERVATION_COLUMNS
+        if column not in schema
+    ]
+    if not missing_columns:
+        return lazy_frame
+    return lazy_frame.with_columns(missing_columns)
+
+
 def grid_aggregates(lazy_frame: pl.LazyFrame, grid_decimals: int) -> pl.DataFrame:
     grouped_columns = [
         "lat_bin",
@@ -54,9 +76,10 @@ def grid_aggregates(lazy_frame: pl.LazyFrame, grid_decimals: int) -> pl.DataFram
         "scientificName",
         "year",
         "stateProvince",
+        *CONSERVATION_COLUMNS,
     ]
     return (
-        spatial_source(lazy_frame, grid_decimals)
+        spatial_source(with_conservation_columns(lazy_frame), grid_decimals)
         .group_by(grouped_columns)
         .agg(
             [
@@ -98,6 +121,17 @@ def dimension_values(lazy_frame: pl.LazyFrame, mapped_row_count: int) -> dict[st
     year_values = lazy_frame.select(
         pl.col("year").drop_nulls().unique().sort()
     ).collect().to_series().to_list()
+    schema = lazy_frame.collect_schema()
+    status_values = []
+    state_status_values = []
+    if "Status" in schema:
+        status_values = lazy_frame.select(
+            pl.col("Status").drop_nulls().unique().sort()
+        ).collect().to_series().to_list()
+    if "state_status" in schema:
+        state_status_values = lazy_frame.select(
+            pl.col("state_status").drop_nulls().unique().sort()
+        ).collect().to_series().to_list()
     return {
         "built_at_utc": utc_timestamp(),
         "row_count": int(row["row_count"]),
@@ -107,6 +141,8 @@ def dimension_values(lazy_frame: pl.LazyFrame, mapped_row_count: int) -> dict[st
         "species_values": species_values,
         "scientific_name_values": scientific_name_values,
         "state_values": state_values,
+        "status_values": status_values,
+        "state_status_values": state_status_values,
         "year_values": year_values,
         "min_year": row["min_year"],
         "max_year": row["max_year"],
