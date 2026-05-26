@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import inspect
 import math
 import sys
@@ -213,6 +214,40 @@ def pie_svg_data_url(svg: str) -> str:
     return "data:image/svg+xml;charset=utf-8," + quote(svg, safe="")
 
 
+def build_dominant_tooltip_html(
+    *,
+    color_level_label: str,
+    dominant_value: str,
+    share_percent: str,
+    total_records: int,
+    dominant_count: int,
+    composition_text: str,
+    pie_url: str,
+) -> str:
+    composition_html = html.escape(composition_text or "").replace("\n", "<br/>")
+    return (
+        '<div style="font-family:Inter,Arial,sans-serif;line-height:1.35;">'
+        '<div style="font-weight:700;margin-bottom:6px;">'
+        f"Dominant {html.escape(color_level_label)}: {html.escape(dominant_value)}"
+        "</div>"
+        '<div style="display:flex;gap:10px;align-items:flex-start;">'
+        f'<img src="{pie_url}" width="96" height="96" '
+        'style="flex:0 0 auto;border-radius:50%;background:#ffffff;" />'
+        '<div style="min-width:160px;">'
+        f"<div>Share: <b>{html.escape(share_percent)}</b></div>"
+        f"<div>Total records: <b>{total_records:,}</b></div>"
+        f"<div>Dominant records: <b>{dominant_count:,}</b></div>"
+        "</div>"
+        "</div>"
+        '<div style="font-weight:700;margin-top:8px;">Composition</div>'
+        '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;'
+        'font-size:12px;white-space:normal;">'
+        f"{composition_html}"
+        "</div>"
+        "</div>"
+    )
+
+
 def add_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -254,6 +289,19 @@ def add_dominant_category_visual_fields(rows: list[dict[str, Any]]) -> list[dict
         color_level_label = COLOR_LEVEL_DISPLAY_NAMES.get(str(color_level), "category")
         total_records = int(row.get("total_record_count") or 0)
         share_percent = f"{dominant_share * 100:.1f}%"
+        composition_text = row.get("composition_text") or ""
+        pie_url = pie_svg_data_url(
+            build_pie_svg(composition, color_level=str(color_level or "category"))
+        )
+        tooltip_html = build_dominant_tooltip_html(
+            color_level_label=color_level_label,
+            dominant_value=dominant_value,
+            share_percent=share_percent,
+            total_records=total_records,
+            dominant_count=dominant_count,
+            composition_text=composition_text,
+            pie_url=pie_url,
+        )
         visual_rows.append(
             {
                 **row,
@@ -263,11 +311,13 @@ def add_dominant_category_visual_fields(rows: list[dict[str, Any]]) -> list[dict
                 "dominant_share_percent": share_percent,
                 "fill_color": color,
                 "radius_pixels": dominant_point_radius(total_records),
+                "tooltip_pie_url": pie_url,
+                "tooltip_html": tooltip_html,
                 "tooltip": (
                     f"Dominant {color_level_label} {dominant_value}: "
                     f"{share_percent} of {total_records:,} records\n"
                     f"Dominant records: {dominant_count:,}\n"
-                    f"Composition:\n{row.get('composition_text') or ''}"
+                    f"Composition:\n{composition_text}"
                 ),
             }
         )
@@ -664,7 +714,18 @@ def render_dominant_category_map(rows: list[dict[str, Any]], st: Any, pdk: Any) 
             pitch=0,
         ),
         layers=[layer],
-        tooltip={"text": "{tooltip}"},
+        tooltip={
+            "html": "{tooltip_html}",
+            "style": {
+                "backgroundColor": "rgba(17, 24, 39, 0.96)",
+                "border": "1px solid rgba(255, 255, 255, 0.18)",
+                "borderRadius": "6px",
+                "boxShadow": "0 12px 32px rgba(15, 23, 42, 0.28)",
+                "color": "#f9fafb",
+                "maxWidth": "360px",
+                "padding": "10px",
+            },
+        },
     )
     st.pydeck_chart(deck, width="stretch", height=MAP_HEIGHT_PX)
 

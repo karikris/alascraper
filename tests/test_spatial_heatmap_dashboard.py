@@ -812,6 +812,30 @@ def test_dashboard_precomputes_dominant_category_visual_fields() -> None:
     assert high_share["fill_color"][3] > low_share["fill_color"][3]
 
 
+def test_dashboard_dominant_tooltip_embeds_composition_pie_svg() -> None:
+    rows = dashboard.add_dominant_category_visual_fields(
+        [
+            {
+                "total_record_count": 100,
+                "color_level": "family",
+                "composition": [
+                    {"value": "Nymphalidae", "record_count": 70, "share": 0.7},
+                    {"value": "Lycaenidae", "record_count": 30, "share": 0.3},
+                ],
+                "composition_text": "Nymphalidae: 70 (70.0%)\nLycaenidae: 30 (30.0%)",
+            }
+        ]
+    )
+
+    tooltip_html = rows[0]["tooltip_html"]
+
+    assert rows[0]["tooltip_pie_url"].startswith("data:image/svg+xml;charset=utf-8,")
+    assert '<img src="data:image/svg+xml;charset=utf-8,' in tooltip_html
+    assert "Dominant family" in tooltip_html
+    assert "Nymphalidae" in tooltip_html
+    assert "Lycaenidae: 30 (30.0%)" in tooltip_html
+
+
 def test_dashboard_builds_piechart_icon_visual_fields() -> None:
     rows = dashboard.add_piechart_visual_fields(
         [
