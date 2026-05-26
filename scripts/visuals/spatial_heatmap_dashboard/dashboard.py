@@ -374,6 +374,20 @@ def active_year_bounds(
     return selected_range
 
 
+def slicer_state(**kwargs: Any) -> query.SlicerState:
+    parameters = inspect.signature(query.SlicerState).parameters
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    supported_kwargs = (
+        kwargs
+        if accepts_kwargs
+        else {key: value for key, value in kwargs.items() if key in parameters}
+    )
+    return query.SlicerState(**supported_kwargs)
+
+
 def build_partial_slicer_state(
     options: dict[str, list[Any]],
     family_st: Any,
@@ -394,7 +408,7 @@ def build_partial_slicer_state(
         disabled=not years,
     )
     active_year_min, active_year_max = active_year_bounds(years, selected_range)
-    return query.SlicerState(
+    return slicer_state(
         include_families=include_families,
         exclude_families=exclude_families,
         include_states=include_states,
@@ -728,7 +742,7 @@ def main() -> None:
         st.error(f"Missing grid bins: {grid_path}")
         st.stop()
 
-    base_options = query.option_values(grid_path, query.SlicerState())
+    base_options = query.option_values(grid_path, slicer_state())
     map_point_limit = map_point_limit_selector(max_controls)
     coordinate_decimals = coordinate_precision_selector(max_controls)
     locked_color_dimension = color_lock_selector(max_controls)
@@ -742,7 +756,7 @@ def main() -> None:
         base_options,
         conservation_controls,
     )
-    conservation_slicers = query.SlicerState(
+    conservation_slicers = slicer_state(
         conservation_scope=conservation_scope,
         include_conservation_statuses=conservation_statuses,
     )
@@ -752,7 +766,7 @@ def main() -> None:
         family_options,
         family_controls,
     )
-    family_slicers = query.SlicerState(
+    family_slicers = slicer_state(
         include_families=include_families,
         exclude_families=exclude_families,
         conservation_scope=conservation_scope,
@@ -760,7 +774,7 @@ def main() -> None:
     )
     genus_options = query.option_values(grid_path, family_slicers)["genera"]
     include_genera, exclude_genera = filter_mode("Genus", genus_options, genus_controls)
-    genus_slicers = query.SlicerState(
+    genus_slicers = slicer_state(
         include_families=include_families,
         exclude_families=exclude_families,
         include_genera=include_genera,
@@ -770,7 +784,7 @@ def main() -> None:
     )
     species_options = query.option_values(grid_path, genus_slicers)["species"]
     include_species, exclude_species = filter_mode("Species", species_options, species_controls)
-    species_slicers = query.SlicerState(
+    species_slicers = slicer_state(
         include_families=include_families,
         exclude_families=exclude_families,
         include_genera=include_genera,
@@ -786,7 +800,7 @@ def main() -> None:
         state_controls,
         st.session_state,
     )
-    state_slicers = query.SlicerState(
+    state_slicers = slicer_state(
         include_families=include_families,
         exclude_families=exclude_families,
         include_genera=include_genera,
@@ -815,7 +829,7 @@ def main() -> None:
     )
     show_year_comparison = display_controls.checkbox("Show year comparison", value=False)
     show_filtered_rows = display_controls.checkbox("Show filtered rows", value=False)
-    slicers = query.SlicerState(
+    slicers = slicer_state(
         include_families=include_families,
         exclude_families=exclude_families,
         include_genera=include_genera,

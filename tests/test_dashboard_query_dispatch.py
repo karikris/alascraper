@@ -5,6 +5,67 @@ from typing import Any
 from scripts.visuals.spatial_heatmap_dashboard import dashboard
 
 
+def test_slicer_state_dispatch_passes_conservation_args_when_supported(
+    monkeypatch: Any,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    class QueryModule:
+        @staticmethod
+        def SlicerState(
+            *,
+            include_families: list[str] | None = None,
+            conservation_scope: str | None = None,
+            include_conservation_statuses: list[str] | None = None,
+        ) -> dict[str, Any]:
+            seen.update(
+                {
+                    "include_families": include_families,
+                    "conservation_scope": conservation_scope,
+                    "include_conservation_statuses": include_conservation_statuses,
+                }
+            )
+            return {"ok": True}
+
+    monkeypatch.setattr(dashboard, "query", QueryModule)
+
+    state = dashboard.slicer_state(
+        include_families=["A"],
+        conservation_scope="national",
+        include_conservation_statuses=["Endangered"],
+    )
+
+    assert state == {"ok": True}
+    assert seen == {
+        "include_families": ["A"],
+        "conservation_scope": "national",
+        "include_conservation_statuses": ["Endangered"],
+    }
+
+
+def test_slicer_state_dispatch_omits_conservation_args_when_unsupported(
+    monkeypatch: Any,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    class QueryModule:
+        @staticmethod
+        def SlicerState(*, include_families: list[str] | None = None) -> dict[str, Any]:
+            seen["include_families"] = include_families
+            return {"ok": True}
+
+    monkeypatch.setattr(dashboard, "query", QueryModule)
+
+    state = dashboard.slicer_state(
+        include_families=["A"],
+        conservation_scope="national",
+        include_conservation_statuses=["Endangered"],
+    )
+
+    assert state == {"ok": True}
+    assert seen == {"include_families": ["A"]}
+
+
 def test_query_dispatch_passes_coordinate_precision_when_supported() -> None:
     seen: dict[str, Any] = {}
 
