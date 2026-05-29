@@ -876,17 +876,8 @@ def test_dashboard_pie_svg_contains_one_path_per_slice() -> None:
     assert dashboard.OTHER_COLOR_HEX in svg
 
 
-def test_dashboard_map_display_modes_include_piechart_composition() -> None:
-    assert dashboard.PIECHART_COMPOSITION_MODE in dashboard.MAP_DISPLAY_MODES
-
-
-def test_dashboard_defaults_to_dominant_category_mode() -> None:
-    assert dashboard.MAP_DISPLAY_MODES[0] == dashboard.DOMINANT_CATEGORY_MODE
-
-
-def test_dashboard_compare_category_heatmaps_mode_remains_available() -> None:
-    assert dashboard.CATEGORY_SHARE_HEATMAPS_MODE == "Compare category heatmaps"
-    assert dashboard.CATEGORY_SHARE_HEATMAPS_MODE in dashboard.MAP_DISPLAY_MODES
+def test_dashboard_decommissions_point_map_display_modes() -> None:
+    assert dashboard.MAP_DISPLAY_MODES == [dashboard.DOMINANT_CATEGORY_MODE]
 
 
 def test_dashboard_map_display_selector_uses_versioned_state_key() -> None:

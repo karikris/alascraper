@@ -246,3 +246,71 @@ def test_dashboard_precomputes_sa3_polygon_features_with_record_count_opacity() 
     assert features["features"][0]["geometry"]["type"] == "Polygon"
     assert features["features"][0]["properties"]["sa3_name_2021"] == "Melbourne City"
     assert features["features"][0]["properties"]["fill_color"] == visual_rows[0]["fill_color"]
+
+
+def test_dashboard_renders_sa3_dominant_map_with_geojson_layer() -> None:
+    class FakePdk:
+        class ViewState:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+        class Layer:
+            def __init__(self, layer_name: str, data: object, **kwargs: object) -> None:
+                self.layer_name = layer_name
+                self.data = data
+                self.kwargs = kwargs
+
+        class Deck:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+    class FakeSt:
+        def __init__(self) -> None:
+            self.deck = None
+            self.height = None
+
+        def pydeck_chart(self, deck: object, **kwargs: object) -> None:
+            self.deck = deck
+            self.height = kwargs["height"]
+
+    st = FakeSt()
+
+    dashboard.render_sa3_dominant_map(
+        [
+            {
+                "sa3_code_2021": "20101",
+                "sa3_name_2021": "Melbourne City",
+                "geometry_geojson": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [144.8, -37.9],
+                            [145.1, -37.9],
+                            [145.1, -37.7],
+                            [144.8, -37.7],
+                            [144.8, -37.9],
+                        ]
+                    ],
+                },
+                "total_record_count": 10,
+                "color_level": "family",
+                "composition": [
+                    {"value": "Nymphalidae", "record_count": 7, "share": 0.7},
+                    {"value": "Lycaenidae", "record_count": 3, "share": 0.3},
+                ],
+                "composition_text": "Nymphalidae: 7 (70.0%)\nLycaenidae: 3 (30.0%)",
+                "dominant_value": "Nymphalidae",
+                "dominant_record_count": 7,
+                "dominant_share": 0.7,
+            }
+        ],
+        st,
+        FakePdk,
+    )
+
+    layer = st.deck.kwargs["layers"][0]
+    assert layer.layer_name == "GeoJsonLayer"
+    assert layer.kwargs["get_fill_color"] == "properties.fill_color"
+    assert layer.kwargs["get_line_color"] == "properties.line_color"
+    assert layer.kwargs["pickable"] is True
+    assert st.height == dashboard.MAP_HEIGHT_PX
