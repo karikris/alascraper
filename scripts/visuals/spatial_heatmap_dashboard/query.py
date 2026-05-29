@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -631,6 +632,155 @@ def query_composition_markers(
                 for item in marker["composition"]
             )
         return list(marker_rows.values())
+    finally:
+        con.close()
+
+
+def query_sa3_composition_shapes(
+    sa3_bins_path: Path,
+    sa3_boundaries_path: Path,
+    filters: SlicerState,
+    *,
+    limit: int = 500,
+    locked_color_dimension: str | None = None,
+    top_n: int = 8,
+) -> list[dict[str, Any]]:
+    """Return one dominant-composition row per SA3 polygon."""
+
+    con = duckdb.connect(":memory:")
+    try:
+        color_by = color_dimension(filters, locked_color_dimension)
+        top_n = max(int(top_n), 1)
+        result = con.execute(
+            f"""
+            WITH filtered AS (
+                SELECT
+                    sa3_code_2021,
+                    COALESCE(CAST({color_by} AS VARCHAR), 'not supplied')
+                        AS active_color_value,
+                    record_count
+                FROM read_parquet({sql_string(Path(sa3_bins_path).as_posix())})
+                {where_sql(filters)}
+            ),
+            sa3_totals AS (
+                SELECT
+                    sa3_code_2021,
+                    SUM(record_count) AS total_record_count
+                FROM filtered
+                GROUP BY sa3_code_2021
+                ORDER BY total_record_count DESC, sa3_code_2021
+                LIMIT {int(limit)}
+            ),
+            category_counts AS (
+                SELECT
+                    filtered.sa3_code_2021,
+                    filtered.active_color_value AS color_value,
+                    SUM(filtered.record_count) AS category_record_count
+                FROM filtered
+                INNER JOIN sa3_totals USING (sa3_code_2021)
+                GROUP BY filtered.sa3_code_2021, filtered.active_color_value
+            ),
+            ranked AS (
+                SELECT
+                    category_counts.*,
+                    sa3_totals.total_record_count,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY category_counts.sa3_code_2021
+                        ORDER BY category_record_count DESC, color_value
+                    ) AS category_rank
+                FROM category_counts
+                INNER JOIN sa3_totals USING (sa3_code_2021)
+            ),
+            labeled AS (
+                SELECT
+                    sa3_code_2021,
+                    total_record_count,
+                    CASE
+                        WHEN category_rank <= {top_n} THEN color_value
+                        ELSE 'Other'
+                    END AS color_value,
+                    CASE
+                        WHEN category_rank <= {top_n} THEN category_rank
+                        ELSE {top_n + 1}
+                    END AS category_order,
+                    category_record_count
+                FROM ranked
+            ),
+            collapsed AS (
+                SELECT
+                    sa3_code_2021,
+                    total_record_count,
+                    color_value,
+                    SUM(category_record_count) AS record_count,
+                    MIN(category_order) AS category_order
+                FROM labeled
+                GROUP BY sa3_code_2021, total_record_count, color_value
+            )
+            SELECT
+                boundaries.sa3_code_2021,
+                boundaries.sa3_name_2021,
+                boundaries.geometry_geojson,
+                collapsed.total_record_count,
+                collapsed.color_value,
+                collapsed.record_count
+            FROM collapsed
+            INNER JOIN read_parquet({sql_string(Path(sa3_boundaries_path).as_posix())})
+                AS boundaries
+                USING (sa3_code_2021)
+            ORDER BY
+                collapsed.total_record_count DESC,
+                boundaries.sa3_code_2021,
+                collapsed.category_order,
+                collapsed.color_value
+            """
+        )
+        rows_by_sa3: dict[str, dict[str, Any]] = {}
+        for (
+            sa3_code,
+            sa3_name,
+            geometry_geojson,
+            total_record_count,
+            color_value,
+            record_count,
+        ) in result.fetchall():
+            marker = rows_by_sa3.setdefault(
+                str(sa3_code),
+                {
+                    "sa3_code_2021": str(sa3_code),
+                    "sa3_name_2021": str(sa3_name),
+                    "geometry_geojson": json.loads(geometry_geojson),
+                    "total_record_count": int(total_record_count),
+                    "color_level": color_by,
+                    "composition": [],
+                    "composition_text": "",
+                    "dominant_value": "not supplied",
+                    "dominant_record_count": 0,
+                    "dominant_share": 0.0,
+                },
+            )
+            count = int(record_count)
+            total = int(total_record_count)
+            share = count / total if total else 0.0
+            marker["composition"].append(
+                {
+                    "value": color_value,
+                    "record_count": count,
+                    "share": share,
+                }
+            )
+
+        for marker in rows_by_sa3.values():
+            marker["composition_text"] = "\n".join(
+                f"{item['value']}: {int(item['record_count']):,} "
+                f"({float(item['share']) * 100:.1f}%)"
+                for item in marker["composition"]
+            )
+            if marker["composition"]:
+                dominant = marker["composition"][0]
+                marker["dominant_value"] = dominant["value"]
+                marker["dominant_record_count"] = int(dominant["record_count"])
+                marker["dominant_share"] = float(dominant["share"])
+        return list(rows_by_sa3.values())
     finally:
         con.close()
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import html
 import inspect
+import json
 import math
 import sys
 from pathlib import Path
@@ -15,9 +16,25 @@ from urllib.parse import quote
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from scripts.visuals.spatial_heatmap_dashboard import query
+try:
+    from scripts.visuals.spatial_heatmap_dashboard import query
+except ModuleNotFoundError:
+    import query  # type: ignore[no-redef]
 
 
+def default_data_path(deployment_path: str, source_path: str) -> Path:
+    local_path = Path(deployment_path)
+    return local_path if local_path.exists() else Path(source_path)
+
+
+DEFAULT_SA3_BINS_PATH = default_data_path(
+    "data/butterfly_sa3_bins.parquet",
+    "datasets/insecta/lepidoptera/dashboard/butterfly_sa3_bins.parquet",
+)
+DEFAULT_SA3_BOUNDARIES_PATH = default_data_path(
+    "data/sa3_boundaries_2021.parquet",
+    "datasets/insecta/lepidoptera/dashboard/sa3_boundaries_2021.parquet",
+)
 DEFAULT_GRID_PATH = Path("datasets/insecta/lepidoptera/dashboard/butterfly_grid_bins.parquet")
 PAGE_TITLE = "Butterfly Dashboard"
 EAST_COAST_STATES = [
@@ -53,6 +70,8 @@ MAP_DISPLAY_MODES = [
     SINGLE_COLOR_MODE,
     SHARE_HEATMAP_MODE,
 ]
+SA3_POLYGON_MIN_ALPHA = 45
+SA3_POLYGON_MAX_ALPHA = 220
 DOMINANT_POINT_RADIUS_SCALE: tuple[tuple[int, int], ...] = (
     (1, 3),
     (10, 5),
@@ -322,6 +341,102 @@ def add_dominant_category_visual_fields(rows: list[dict[str, Any]]) -> list[dict
             }
         )
     return visual_rows
+
+
+def sa3_polygon_alpha(
+    record_count: int | float | None,
+    *,
+    max_record_count: int | float | None,
+) -> int:
+    count = max(float(record_count or 0), 1.0)
+    max_count = max(float(max_record_count or 0), 1.0)
+    if max_count <= 1:
+        return SA3_POLYGON_MIN_ALPHA
+    position = (count - 1.0) / (max_count - 1.0)
+    position = max(0.0, min(position, 1.0))
+    return round(
+        SA3_POLYGON_MIN_ALPHA
+        + position * (SA3_POLYGON_MAX_ALPHA - SA3_POLYGON_MIN_ALPHA)
+    )
+
+
+def build_sa3_tooltip_html(row: dict[str, Any], pie_url: str) -> str:
+    color_level = str(row.get("color_level") or "category")
+    color_level_label = COLOR_LEVEL_DISPLAY_NAMES.get(color_level, "category")
+    dominant_value = str(row.get("dominant_value") or "Not supplied")
+    dominant_count = int(row.get("dominant_record_count") or 0)
+    dominant_share = float(row.get("dominant_share") or 0)
+    total_records = int(row.get("total_record_count") or 0)
+    composition_text = str(row.get("composition_text") or "")
+    base = build_dominant_tooltip_html(
+        color_level_label=color_level_label,
+        dominant_value=dominant_value,
+        share_percent=f"{dominant_share * 100:.1f}%",
+        total_records=total_records,
+        dominant_count=dominant_count,
+        composition_text=composition_text,
+        pie_url=pie_url,
+    )
+    sa3_header = (
+        '<div style="font-weight:700;margin-bottom:6px;">'
+        f"SA3: {html.escape(str(row.get('sa3_name_2021') or 'Unknown SA3'))}"
+        "</div>"
+    )
+    return base.replace(
+        '<div style="font-family:Inter,Arial,sans-serif;line-height:1.35;">',
+        '<div style="font-family:Inter,Arial,sans-serif;line-height:1.35;">'
+        + sa3_header,
+        1,
+    )
+
+
+def add_sa3_polygon_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    max_record_count = max(
+        (int(row.get("total_record_count") or 0) for row in rows),
+        default=1,
+    )
+    visual_rows = []
+    for row in rows:
+        color_level = row.get("color_level")
+        dominant_value = row.get("dominant_value") or "Not supplied"
+        color = map_color(color_level, str(dominant_value)).copy()
+        color[3] = sa3_polygon_alpha(
+            row.get("total_record_count"),
+            max_record_count=max_record_count,
+        )
+        pie_url = pie_svg_data_url(
+            build_pie_svg(
+                row.get("composition") or [],
+                color_level=str(color_level or "category"),
+            )
+        )
+        visual_rows.append(
+            {
+                **row,
+                "fill_color": color,
+                "line_color": [17, 24, 39, 150],
+                "tooltip_pie_url": pie_url,
+                "tooltip_html": build_sa3_tooltip_html(row, pie_url),
+            }
+        )
+    return visual_rows
+
+
+def sa3_rows_to_geojson_features(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    features = []
+    for row in rows:
+        geometry = row.get("geometry_geojson")
+        if isinstance(geometry, str):
+            geometry = json.loads(geometry)
+        properties = {key: value for key, value in row.items() if key != "geometry_geojson"}
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": geometry,
+                "properties": properties,
+            }
+        )
+    return {"type": "FeatureCollection", "features": features}
 
 
 def add_piechart_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
