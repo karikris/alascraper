@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import importlib.util
 import inspect
 import json
 import math
@@ -13,13 +14,24 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+def load_query_module() -> Any:
+    module_path = Path(__file__).with_name("query.py")
+    module_name = "_butterfly_dashboard_query"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load dashboard query module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    if not hasattr(module, "query_sa3_composition_shapes"):
+        raise AttributeError(
+            f"Dashboard query module at {module_path} does not expose "
+            "query_sa3_composition_shapes."
+        )
+    return module
 
-try:
-    from scripts.visuals.spatial_heatmap_dashboard import query
-except ModuleNotFoundError:
-    import query  # type: ignore[no-redef]
+
+query = load_query_module()
 
 
 def default_data_path(deployment_path: str, source_path: str) -> Path:

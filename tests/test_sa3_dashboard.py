@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import polars as pl
@@ -107,6 +109,18 @@ def test_sa3_build_defaults_use_abs_gda2020_shapefile_and_since_1950_cutoff() ->
     assert build_sa3_bins.ABS_SA3_GDA2020_SHAPEFILE_URL.endswith(
         "/SA3_2021_AUST_SHP_GDA2020.zip"
     )
+
+
+def test_dashboard_loads_sibling_query_when_plain_query_module_is_stale(
+    monkeypatch,
+) -> None:
+    stale_query = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "query", stale_query)
+
+    loaded_query = dashboard.load_query_module()
+
+    assert loaded_query is not stale_query
+    assert hasattr(loaded_query, "query_sa3_composition_shapes")
 
 
 def test_query_sa3_composition_shapes_returns_one_row_per_sa3_with_dominant_family(
