@@ -23,10 +23,10 @@ def load_query_module() -> Any:
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
-    if not hasattr(module, "query_sa3_composition_shapes"):
+    if not hasattr(module, "query_area_composition_shapes"):
         raise AttributeError(
             f"Dashboard query module at {module_path} does not expose "
-            "query_sa3_composition_shapes."
+            "query_area_composition_shapes."
         )
     return module
 
@@ -39,6 +39,22 @@ def default_data_path(deployment_path: str, source_path: str) -> Path:
     return local_path if local_path.exists() else Path(source_path)
 
 
+DEFAULT_SA1_BINS_PATH = default_data_path(
+    "data/butterfly_sa1_bins.parquet",
+    "datasets/insecta/lepidoptera/dashboard/butterfly_sa1_bins.parquet",
+)
+DEFAULT_SA1_BOUNDARIES_PATH = default_data_path(
+    "data/sa1_boundaries_2021.parquet",
+    "datasets/insecta/lepidoptera/dashboard/sa1_boundaries_2021.parquet",
+)
+DEFAULT_SA2_BINS_PATH = default_data_path(
+    "data/butterfly_sa2_bins.parquet",
+    "datasets/insecta/lepidoptera/dashboard/butterfly_sa2_bins.parquet",
+)
+DEFAULT_SA2_BOUNDARIES_PATH = default_data_path(
+    "data/sa2_boundaries_2021.parquet",
+    "datasets/insecta/lepidoptera/dashboard/sa2_boundaries_2021.parquet",
+)
 DEFAULT_SA3_BINS_PATH = default_data_path(
     "data/butterfly_sa3_bins.parquet",
     "datasets/insecta/lepidoptera/dashboard/butterfly_sa3_bins.parquet",
@@ -47,6 +63,33 @@ DEFAULT_SA3_BOUNDARIES_PATH = default_data_path(
     "data/sa3_boundaries_2021.parquet",
     "datasets/insecta/lepidoptera/dashboard/sa3_boundaries_2021.parquet",
 )
+DEFAULT_AREA_LEVEL = "SA2"
+AREA_LEVEL_DATASETS = {
+    "SA1": {
+        "bins_path": DEFAULT_SA1_BINS_PATH,
+        "boundaries_path": DEFAULT_SA1_BOUNDARIES_PATH,
+        "code_column": "sa1_code_2021",
+        "name_column": "sa1_name_2021",
+        "default_polygon_limit": 8_000,
+        "max_polygon_limit": 25_000,
+    },
+    "SA2": {
+        "bins_path": DEFAULT_SA2_BINS_PATH,
+        "boundaries_path": DEFAULT_SA2_BOUNDARIES_PATH,
+        "code_column": "sa2_code_2021",
+        "name_column": "sa2_name_2021",
+        "default_polygon_limit": 3_000,
+        "max_polygon_limit": 25_000,
+    },
+    "SA3": {
+        "bins_path": DEFAULT_SA3_BINS_PATH,
+        "boundaries_path": DEFAULT_SA3_BOUNDARIES_PATH,
+        "code_column": "sa3_code_2021",
+        "name_column": "sa3_name_2021",
+        "default_polygon_limit": 500,
+        "max_polygon_limit": 25_000,
+    },
+}
 DEFAULT_GRID_PATH = Path("datasets/insecta/lepidoptera/dashboard/butterfly_grid_bins.parquet")
 PAGE_TITLE = "Butterfly Dashboard"
 EAST_COAST_STATES = [
@@ -370,6 +413,12 @@ def sa3_polygon_alpha(
 
 
 def build_sa3_tooltip_html(row: dict[str, Any], pie_url: str) -> str:
+    area_level = str(row.get("area_level") or "SA3")
+    area_name = str(
+        row.get("area_name_2021")
+        or row.get("sa3_name_2021")
+        or f"Unknown {area_level}"
+    )
     color_level = str(row.get("color_level") or "category")
     color_level_label = COLOR_LEVEL_DISPLAY_NAMES.get(color_level, "category")
     dominant_value = str(row.get("dominant_value") or "Not supplied")
@@ -394,7 +443,7 @@ def build_sa3_tooltip_html(row: dict[str, Any], pie_url: str) -> str:
     return (
         '<div style="font-family:Inter,Arial,sans-serif;line-height:1.35;">'
         '<div style="font-weight:700;margin-bottom:6px;">'
-        f"SA3: {html.escape(str(row.get('sa3_name_2021') or 'Unknown SA3'))}"
+        f"{html.escape(area_level)}: {html.escape(area_name)}"
         "</div>"
         '<div style="font-weight:700;margin-bottom:6px;">'
         f"Dominant {html.escape(color_level_label)}: {html.escape(dominant_value)}"
@@ -623,14 +672,27 @@ def build_partial_slicer_state(
     )
 
 
-def map_point_limit_selector(st: Any) -> int:
+def area_level_selector(st: Any) -> str:
+    levels = list(AREA_LEVEL_DATASETS)
+    return st.radio(
+        "ABS area level",
+        levels,
+        index=levels.index(DEFAULT_AREA_LEVEL),
+        horizontal=True,
+        key="area_level_v1",
+    )
+
+
+def map_point_limit_selector(st: Any, area_level: str = DEFAULT_AREA_LEVEL) -> int:
+    area_config = AREA_LEVEL_DATASETS.get(area_level, AREA_LEVEL_DATASETS[DEFAULT_AREA_LEVEL])
     return int(
         st.number_input(
-            "Max SA3 polygons",
+            "Max polygons",
             min_value=1,
-            max_value=500,
-            value=DEFAULT_SA3_POLYGON_LIMIT,
-            step=10,
+            max_value=int(area_config["max_polygon_limit"]),
+            value=int(area_config["default_polygon_limit"]),
+            step=100,
+            key=f"max_polygons_{area_level.lower()}_v1",
         )
     )
 
@@ -983,6 +1045,7 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.title(PAGE_TITLE)
+    area_controls = st.sidebar.container()
     max_controls = st.sidebar.container()
     family_controls = st.sidebar.container()
     genus_controls = st.sidebar.container()
@@ -993,21 +1056,31 @@ def main() -> None:
     display_controls = st.sidebar.container()
     config = st.sidebar.container()
     summary = st.sidebar.container()
-    sa3_bins_path = Path(
-        config.text_input("SA3 bins parquet", value=str(DEFAULT_SA3_BINS_PATH))
+    area_level = area_level_selector(area_controls)
+    area_config = AREA_LEVEL_DATASETS[area_level]
+    area_bins_path = Path(
+        config.text_input(
+            f"{area_level} bins parquet",
+            value=str(area_config["bins_path"]),
+            key=f"{area_level.lower()}_bins_path_v1",
+        )
     )
-    sa3_boundaries_path = Path(
-        config.text_input("SA3 boundaries parquet", value=str(DEFAULT_SA3_BOUNDARIES_PATH))
+    area_boundaries_path = Path(
+        config.text_input(
+            f"{area_level} boundaries parquet",
+            value=str(area_config["boundaries_path"]),
+            key=f"{area_level.lower()}_boundaries_path_v1",
+        )
     )
-    if not sa3_bins_path.exists():
-        st.error(f"Missing SA3 bins: {sa3_bins_path}")
+    if not area_bins_path.exists():
+        st.error(f"Missing {area_level} bins: {area_bins_path}")
         st.stop()
-    if not sa3_boundaries_path.exists():
-        st.error(f"Missing SA3 boundaries: {sa3_boundaries_path}")
+    if not area_boundaries_path.exists():
+        st.error(f"Missing {area_level} boundaries: {area_boundaries_path}")
         st.stop()
 
-    base_options = query.option_values(sa3_bins_path, slicer_state())
-    map_polygon_limit = map_point_limit_selector(max_controls)
+    base_options = query.option_values(area_bins_path, slicer_state())
+    map_polygon_limit = map_point_limit_selector(max_controls, area_level)
     locked_color_dimension = color_lock_selector(max_controls)
     conservation_scope, conservation_statuses = conservation_selector(
         base_options,
@@ -1017,7 +1090,7 @@ def main() -> None:
         conservation_scope=conservation_scope,
         include_conservation_statuses=conservation_statuses,
     )
-    family_options = query.option_values(sa3_bins_path, conservation_slicers)["families"]
+    family_options = query.option_values(area_bins_path, conservation_slicers)["families"]
     include_families, exclude_families = filter_mode(
         "Family",
         family_options,
@@ -1029,7 +1102,7 @@ def main() -> None:
         conservation_scope=conservation_scope,
         include_conservation_statuses=conservation_statuses,
     )
-    genus_options = query.option_values(sa3_bins_path, family_slicers)["genera"]
+    genus_options = query.option_values(area_bins_path, family_slicers)["genera"]
     include_genera, exclude_genera = filter_mode("Genus", genus_options, genus_controls)
     genus_slicers = slicer_state(
         include_families=include_families,
@@ -1039,7 +1112,7 @@ def main() -> None:
         conservation_scope=conservation_scope,
         include_conservation_statuses=conservation_statuses,
     )
-    species_options = query.option_values(sa3_bins_path, genus_slicers)["species"]
+    species_options = query.option_values(area_bins_path, genus_slicers)["species"]
     include_species, exclude_species = filter_mode("Species", species_options, species_controls)
     species_slicers = slicer_state(
         include_families=include_families,
@@ -1051,7 +1124,7 @@ def main() -> None:
         conservation_scope=conservation_scope,
         include_conservation_statuses=conservation_statuses,
     )
-    state_options = query.option_values(sa3_bins_path, species_slicers)["states"]
+    state_options = query.option_values(area_bins_path, species_slicers)["states"]
     include_states, exclude_states = state_selector(
         state_options,
         state_controls,
@@ -1069,7 +1142,7 @@ def main() -> None:
         conservation_scope=conservation_scope,
         include_conservation_statuses=conservation_statuses,
     )
-    year_options = query.option_values(sa3_bins_path, state_slicers)["years"]
+    year_options = query.option_values(area_bins_path, state_slicers)["years"]
     years_for_slider = [int(year) for year in year_options if year is not None]
     year_min = min(years_for_slider) if years_for_slider else None
     year_max = max(years_for_slider) if years_for_slider else None
@@ -1100,7 +1173,7 @@ def main() -> None:
         conservation_scope=conservation_scope,
         include_conservation_statuses=conservation_statuses,
     )
-    filtered_options = query.option_values(sa3_bins_path, slicers)
+    filtered_options = query.option_values(area_bins_path, slicers)
     summary.subheader("Summary statistics")
     summary.caption(
         f"Families: {len(filtered_options['families'])} | "
@@ -1109,24 +1182,27 @@ def main() -> None:
         f"States: {len(filtered_options['states'])}"
     )
 
-    rows = query.query_sa3_composition_shapes(
-        sa3_bins_path,
-        sa3_boundaries_path,
+    rows = query.query_area_composition_shapes(
+        area_bins_path,
+        area_boundaries_path,
         slicers,
+        area_code_column=str(area_config["code_column"]),
+        area_name_column=str(area_config["name_column"]),
+        area_label=area_level,
         limit=map_polygon_limit,
         locked_color_dimension=locked_color_dimension,
     )
-    years = query.year_summary(sa3_bins_path, slicers)
-    matching_records = query.mapped_record_count(sa3_bins_path, slicers)
+    years = query.year_summary(area_bins_path, slicers)
+    matching_records = query.mapped_record_count(area_bins_path, slicers)
     total_records = sum(int(row["total_record_count"]) for row in rows)
-    summary.metric("SA3 polygons", f"{len(rows):,}")
+    summary.metric(f"{area_level} polygons", f"{len(rows):,}")
     summary.metric("Visible records", f"{total_records:,}")
     summary.metric("Matching records", f"{matching_records:,}")
     summary.metric("Years", f"{len(years):,}")
     if total_records < matching_records:
         summary.warning(
-            f"SA3 polygon cap is hiding {matching_records - total_records:,} "
-            "matching records. Increase Max SA3 polygons or narrow the slicers."
+            f"{area_level} polygon cap is hiding {matching_records - total_records:,} "
+            "matching records. Increase Max polygons or narrow the slicers."
         )
 
     render_sa3_dominant_map(rows, st, pdk)

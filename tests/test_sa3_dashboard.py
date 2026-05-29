@@ -101,6 +101,83 @@ def write_sa3_boundaries_fixture(path: Path) -> None:
     ).write_parquet(path)
 
 
+def write_sa2_bins_fixture(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "sa2_code_2021": ["201011001", "201011001", "301011001"],
+            "sa2_name_2021": ["Carlton", "Carlton", "Brisbane City"],
+            "family": ["A", "B", "A"],
+            "genus": ["Alpha", "Beta", "Gamma"],
+            "species": ["Alpha one", "Beta one", "Gamma one"],
+            "scientificName": ["Alpha one", "Beta one", "Gamma one"],
+            "stateProvince": ["Victoria", "Victoria", "Queensland"],
+            "year": [2010, 2010, 2020],
+            "record_count": [11, 4, 9],
+            "distinct_scientific_names": [1, 1, 1],
+            "distinct_taxon_concepts": [1, 1, 1],
+            "min_year": [2010, 2010, 2020],
+            "max_year": [2010, 2010, 2020],
+            "Status": [None, None, None],
+            "state_status": [None, None, None],
+            "state_status_level": [None, None, None],
+            "state_status_for_occurrence": [None, None, None],
+            "state_status_jurisdiction_matched": [None, None, None],
+            "state_status_qualifier": [None, None, None],
+            "epbc_listed_taxon": [None, None, None],
+            "state_listed_taxon": [None, None, None],
+            "epbc_sprat_url": [None, None, None],
+            "epbc_conservation_advice_url": [None, None, None],
+            "epbc_recovery_plan_url": [None, None, None],
+            "epbc_protected_matters_url": [None, None, None],
+        }
+    ).write_parquet(path)
+
+
+def write_sa2_boundaries_fixture(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "sa2_code_2021": ["201011001", "301011001"],
+            "sa2_name_2021": ["Carlton", "Brisbane City"],
+            "state_code_2021": ["2", "3"],
+            "state_name_2021": ["Victoria", "Queensland"],
+            "area_albers_sqkm": [3.1, 7.4],
+            "geometry_wkb": [b"carlton", b"brisbane-city"],
+            "geometry_geojson": [
+                json.dumps(
+                    {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [
+                                [144.95, -37.82],
+                                [144.98, -37.82],
+                                [144.98, -37.79],
+                                [144.95, -37.79],
+                                [144.95, -37.82],
+                            ]
+                        ],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [
+                                [153.01, -27.48],
+                                [153.04, -27.48],
+                                [153.04, -27.45],
+                                [153.01, -27.45],
+                                [153.01, -27.48],
+                            ]
+                        ],
+                    }
+                ),
+            ],
+        }
+    ).write_parquet(path)
+
+
 def test_sa3_build_defaults_use_abs_gda2020_shapefile_and_since_1950_cutoff() -> None:
     assert build_sa3_bins.SINCE_YEAR_MIN == 1950
     assert build_sa3_bins.DEFAULT_BOUNDARY_DIR == Path(
@@ -109,6 +186,18 @@ def test_sa3_build_defaults_use_abs_gda2020_shapefile_and_since_1950_cutoff() ->
     assert build_sa3_bins.ABS_SA3_GDA2020_SHAPEFILE_URL.endswith(
         "/SA3_2021_AUST_SHP_GDA2020.zip"
     )
+
+
+def test_abs_area_level_configs_are_ordered_sa1_to_sa3_with_sa2_default() -> None:
+    assert build_sa3_bins.DEFAULT_AREA_LEVEL == "SA2"
+    assert list(build_sa3_bins.AREA_LEVEL_CONFIGS) == ["SA1", "SA2", "SA3"]
+
+    sa1 = build_sa3_bins.AREA_LEVEL_CONFIGS["SA1"]
+    sa2 = build_sa3_bins.AREA_LEVEL_CONFIGS["SA2"]
+    assert sa1.boundary_dir == Path("data/boundaries/asgs_ed3/sa1_2021_gda2020")
+    assert sa2.boundary_dir == Path("data/boundaries/asgs_ed3/sa2_2021_gda2020")
+    assert sa2.download_url.endswith("/SA2_2021_AUST_SHP_GDA2020.zip")
+    assert sa2.bins_filename == "butterfly_sa2_bins.parquet"
 
 
 def test_dashboard_loads_sibling_query_when_plain_query_module_is_stale(
@@ -121,6 +210,31 @@ def test_dashboard_loads_sibling_query_when_plain_query_module_is_stale(
 
     assert loaded_query is not stale_query
     assert hasattr(loaded_query, "query_sa3_composition_shapes")
+
+
+def test_dashboard_area_level_selector_orders_sa1_to_sa3_and_defaults_to_sa2() -> None:
+    class FakeSt:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def radio(self, label: str, options: list[str], **kwargs: object) -> str:
+            self.calls.append({"label": label, "options": options, **kwargs})
+            return options[int(kwargs["index"])]
+
+    fake_st = FakeSt()
+
+    selected = dashboard.area_level_selector(fake_st)
+
+    assert selected == "SA2"
+    assert fake_st.calls == [
+        {
+            "label": "ABS area level",
+            "options": ["SA1", "SA2", "SA3"],
+            "index": 1,
+            "horizontal": True,
+            "key": "area_level_v1",
+        }
+    ]
 
 
 def test_query_sa3_composition_shapes_returns_one_row_per_sa3_with_dominant_family(
@@ -141,6 +255,9 @@ def test_query_sa3_composition_shapes_returns_one_row_per_sa3_with_dominant_fami
         {
             "sa3_code_2021": "20101",
             "sa3_name_2021": "Melbourne City",
+            "area_level": "SA3",
+            "area_code_2021": "20101",
+            "area_name_2021": "Melbourne City",
             "geometry_geojson": json.loads(
                 pl.read_parquet(boundaries_path)
                 .filter(pl.col("sa3_code_2021") == "20101")
@@ -156,6 +273,47 @@ def test_query_sa3_composition_shapes_returns_one_row_per_sa3_with_dominant_fami
             "dominant_value": "A",
             "dominant_record_count": 8,
             "dominant_share": 8 / 11,
+        }
+    ]
+
+
+def test_query_area_composition_shapes_returns_one_row_per_selected_abs_area(
+    tmp_path: Path,
+) -> None:
+    bins_path = tmp_path / "butterfly_sa2_bins.parquet"
+    boundaries_path = tmp_path / "sa2_boundaries_2021.parquet"
+    write_sa2_bins_fixture(bins_path)
+    write_sa2_boundaries_fixture(boundaries_path)
+
+    rows = query.query_area_composition_shapes(
+        bins_path,
+        boundaries_path,
+        query.SlicerState(include_states=["Victoria"]),
+        area_code_column="sa2_code_2021",
+        area_name_column="sa2_name_2021",
+        area_label="SA2",
+    )
+
+    assert rows == [
+        {
+            "area_level": "SA2",
+            "area_code_2021": "201011001",
+            "area_name_2021": "Carlton",
+            "geometry_geojson": json.loads(
+                pl.read_parquet(boundaries_path)
+                .filter(pl.col("sa2_code_2021") == "201011001")
+                .item(0, "geometry_geojson")
+            ),
+            "total_record_count": 15,
+            "color_level": "family",
+            "composition": [
+                {"value": "A", "record_count": 11, "share": 11 / 15},
+                {"value": "B", "record_count": 4, "share": 4 / 15},
+            ],
+            "composition_text": "A: 11 (73.3%)\nB: 4 (26.7%)",
+            "dominant_value": "A",
+            "dominant_record_count": 11,
+            "dominant_share": 11 / 15,
         }
     ]
 

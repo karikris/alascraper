@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,12 @@ SHARE_DISPLAY_COLUMNS_BY_COLOR_DIMENSION = {
 
 def sql_string(value: str | Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def sql_identifier(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError(f"Unsafe SQL identifier: {value!r}")
+    return value
 
 
 def coordinate_source_sql(
@@ -636,40 +643,47 @@ def query_composition_markers(
         con.close()
 
 
-def query_sa3_composition_shapes(
-    sa3_bins_path: Path,
-    sa3_boundaries_path: Path,
+def query_area_composition_shapes(
+    area_bins_path: Path,
+    area_boundaries_path: Path,
     filters: SlicerState,
     *,
+    area_code_column: str,
+    area_name_column: str,
+    area_label: str,
     limit: int = 500,
     locked_color_dimension: str | None = None,
     top_n: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Return one dominant-composition row per SA3 polygon."""
+    """Return one dominant-composition row per ABS area polygon."""
 
     con = duckdb.connect(":memory:")
     try:
         color_by = color_dimension(filters, locked_color_dimension)
+        code_column = sql_identifier(area_code_column)
+        name_column = sql_identifier(area_name_column)
         if top_n is None:
             extra_ctes = ""
             composition_sql = """
             SELECT
-                boundaries.sa3_code_2021,
-                boundaries.sa3_name_2021,
+                boundaries.{code_column} AS area_code_2021,
+                boundaries.{name_column} AS area_name_2021,
                 boundaries.geometry_geojson,
                 category_counts.total_record_count,
                 category_counts.color_value,
                 category_counts.category_record_count AS record_count
             FROM category_counts
             INNER JOIN read_parquet({boundaries_path}) AS boundaries
-                USING (sa3_code_2021)
+                ON category_counts.area_code_2021 = boundaries.{code_column}
             ORDER BY
                 category_counts.total_record_count DESC,
-                boundaries.sa3_code_2021,
+                boundaries.{code_column},
                 category_counts.category_record_count DESC,
                 category_counts.color_value
             """.format(
-                boundaries_path=sql_string(Path(sa3_boundaries_path).as_posix())
+                code_column=code_column,
+                name_column=name_column,
+                boundaries_path=sql_string(Path(area_boundaries_path).as_posix()),
             )
         else:
             top_n = max(int(top_n), 1)
@@ -679,14 +693,14 @@ def query_sa3_composition_shapes(
                 SELECT
                     category_counts.*,
                     ROW_NUMBER() OVER (
-                        PARTITION BY category_counts.sa3_code_2021
+                        PARTITION BY category_counts.area_code_2021
                         ORDER BY category_record_count DESC, color_value
                     ) AS category_rank
                 FROM category_counts
             ),
             labeled AS (
                 SELECT
-                    sa3_code_2021,
+                    area_code_2021,
                     total_record_count,
                     CASE
                         WHEN category_rank <= {top_n} THEN color_value
@@ -701,30 +715,30 @@ def query_sa3_composition_shapes(
             ),
             collapsed AS (
                 SELECT
-                    sa3_code_2021,
+                    area_code_2021,
                     total_record_count,
                     color_value,
                     SUM(category_record_count) AS record_count,
                     MIN(category_order) AS category_order
                 FROM labeled
-                GROUP BY sa3_code_2021, total_record_count, color_value
+                GROUP BY area_code_2021, total_record_count, color_value
             )
             """
             composition_sql = f"""
             SELECT
-                boundaries.sa3_code_2021,
-                boundaries.sa3_name_2021,
+                boundaries.{code_column} AS area_code_2021,
+                boundaries.{name_column} AS area_name_2021,
                 boundaries.geometry_geojson,
                 collapsed.total_record_count,
                 collapsed.color_value,
                 collapsed.record_count
             FROM collapsed
-            INNER JOIN read_parquet({sql_string(Path(sa3_boundaries_path).as_posix())})
+            INNER JOIN read_parquet({sql_string(Path(area_boundaries_path).as_posix())})
                 AS boundaries
-                USING (sa3_code_2021)
+                ON collapsed.area_code_2021 = boundaries.{code_column}
             ORDER BY
                 collapsed.total_record_count DESC,
-                boundaries.sa3_code_2021,
+                boundaries.{code_column},
                 collapsed.category_order,
                 collapsed.color_value
             """
@@ -732,50 +746,51 @@ def query_sa3_composition_shapes(
             f"""
             WITH filtered AS (
                 SELECT
-                    sa3_code_2021,
+                    {code_column} AS area_code_2021,
                     COALESCE(CAST({color_by} AS VARCHAR), 'not supplied')
                         AS active_color_value,
                     record_count
-                FROM read_parquet({sql_string(Path(sa3_bins_path).as_posix())})
+                FROM read_parquet({sql_string(Path(area_bins_path).as_posix())})
                 {where_sql(filters)}
             ),
-            sa3_totals AS (
+            area_totals AS (
                 SELECT
-                    sa3_code_2021,
+                    area_code_2021,
                     SUM(record_count) AS total_record_count
                 FROM filtered
-                GROUP BY sa3_code_2021
-                ORDER BY total_record_count DESC, sa3_code_2021
+                GROUP BY area_code_2021
+                ORDER BY total_record_count DESC, area_code_2021
                 LIMIT {int(limit)}
             ),
             category_counts AS (
                 SELECT
-                    filtered.sa3_code_2021,
+                    filtered.area_code_2021,
                     filtered.active_color_value AS color_value,
                     SUM(filtered.record_count) AS category_record_count,
-                    MAX(sa3_totals.total_record_count) AS total_record_count
+                    MAX(area_totals.total_record_count) AS total_record_count
                 FROM filtered
-                INNER JOIN sa3_totals USING (sa3_code_2021)
-                GROUP BY filtered.sa3_code_2021, filtered.active_color_value
+                INNER JOIN area_totals USING (area_code_2021)
+                GROUP BY filtered.area_code_2021, filtered.active_color_value
             )
             {extra_ctes}
             {composition_sql}
             """
         )
-        rows_by_sa3: dict[str, dict[str, Any]] = {}
+        rows_by_area: dict[str, dict[str, Any]] = {}
         for (
-            sa3_code,
-            sa3_name,
+            area_code,
+            area_name,
             geometry_geojson,
             total_record_count,
             color_value,
             record_count,
         ) in result.fetchall():
-            marker = rows_by_sa3.setdefault(
-                str(sa3_code),
+            marker = rows_by_area.setdefault(
+                str(area_code),
                 {
-                    "sa3_code_2021": str(sa3_code),
-                    "sa3_name_2021": str(sa3_name),
+                    "area_level": str(area_label),
+                    "area_code_2021": str(area_code),
+                    "area_name_2021": str(area_name),
                     "geometry_geojson": json.loads(geometry_geojson),
                     "total_record_count": int(total_record_count),
                     "color_level": color_by,
@@ -797,7 +812,7 @@ def query_sa3_composition_shapes(
                 }
             )
 
-        for marker in rows_by_sa3.values():
+        for marker in rows_by_area.values():
             marker["composition_text"] = "\n".join(
                 f"{item['value']}: {int(item['record_count']):,} "
                 f"({float(item['share']) * 100:.1f}%)"
@@ -808,9 +823,37 @@ def query_sa3_composition_shapes(
                 marker["dominant_value"] = dominant["value"]
                 marker["dominant_record_count"] = int(dominant["record_count"])
                 marker["dominant_share"] = float(dominant["share"])
-        return list(rows_by_sa3.values())
+        return list(rows_by_area.values())
     finally:
         con.close()
+
+
+def query_sa3_composition_shapes(
+    sa3_bins_path: Path,
+    sa3_boundaries_path: Path,
+    filters: SlicerState,
+    *,
+    limit: int = 500,
+    locked_color_dimension: str | None = None,
+    top_n: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return one dominant-composition row per SA3 polygon."""
+
+    rows = query_area_composition_shapes(
+        sa3_bins_path,
+        sa3_boundaries_path,
+        filters,
+        area_code_column="sa3_code_2021",
+        area_name_column="sa3_name_2021",
+        area_label="SA3",
+        limit=limit,
+        locked_color_dimension=locked_color_dimension,
+        top_n=top_n,
+    )
+    for row in rows:
+        row["sa3_code_2021"] = row["area_code_2021"]
+        row["sa3_name_2021"] = row["area_name_2021"]
+    return rows
 
 
 def mapped_record_count(grid_path: Path, filters: SlicerState) -> int:
