@@ -376,26 +376,48 @@ def build_sa3_tooltip_html(row: dict[str, Any], pie_url: str) -> str:
     dominant_count = int(row.get("dominant_record_count") or 0)
     dominant_share = float(row.get("dominant_share") or 0)
     total_records = int(row.get("total_record_count") or 0)
-    composition_text = str(row.get("composition_text") or "")
-    base = build_dominant_tooltip_html(
-        color_level_label=color_level_label,
-        dominant_value=dominant_value,
-        share_percent=f"{dominant_share * 100:.1f}%",
-        total_records=total_records,
-        dominant_count=dominant_count,
-        composition_text=composition_text,
-        pie_url=pie_url,
+    composition = sorted(
+        row.get("composition") or [],
+        key=lambda item: (
+            -int(item.get("record_count") or 0),
+            str(item.get("value") or ""),
+        ),
     )
-    sa3_header = (
+    table_rows = "".join(
+        "<tr>"
+        f"<td style=\"padding:2px 10px 2px 0;\">{html.escape(str(item.get('value') or 'Not supplied'))}</td>"
+        f"<td style=\"padding:2px 10px;text-align:right;\">{int(item.get('record_count') or 0):,}</td>"
+        f"<td style=\"padding:2px 0;text-align:right;\">{float(item.get('share') or 0) * 100:.1f}%</td>"
+        "</tr>"
+        for item in composition
+    )
+    return (
+        '<div style="font-family:Inter,Arial,sans-serif;line-height:1.35;">'
         '<div style="font-weight:700;margin-bottom:6px;">'
         f"SA3: {html.escape(str(row.get('sa3_name_2021') or 'Unknown SA3'))}"
         "</div>"
-    )
-    return base.replace(
-        '<div style="font-family:Inter,Arial,sans-serif;line-height:1.35;">',
-        '<div style="font-family:Inter,Arial,sans-serif;line-height:1.35;">'
-        + sa3_header,
-        1,
+        '<div style="font-weight:700;margin-bottom:6px;">'
+        f"Dominant {html.escape(color_level_label)}: {html.escape(dominant_value)}"
+        "</div>"
+        '<div style="display:flex;gap:10px;align-items:flex-start;">'
+        f'<img src="{pie_url}" width="96" height="96" '
+        'style="flex:0 0 auto;border-radius:50%;background:#ffffff;" />'
+        '<div style="min-width:170px;">'
+        f"<div>Dominant share: <b>{dominant_share * 100:.1f}%</b></div>"
+        f"<div>Total records: <b>{total_records:,}</b></div>"
+        f"<div>Dominant records: <b>{dominant_count:,}</b></div>"
+        "</div>"
+        "</div>"
+        f'<div style="font-weight:700;margin-top:8px;">Composition by {html.escape(color_level_label)}</div>'
+        '<table style="border-collapse:collapse;font-size:12px;width:100%;">'
+        '<thead><tr>'
+        '<th style="padding:2px 10px 3px 0;text-align:left;">Value</th>'
+        '<th style="padding:2px 10px 3px;text-align:right;">Records</th>'
+        '<th style="padding:2px 0 3px;text-align:right;">Share</th>'
+        "</tr></thead>"
+        f"<tbody>{table_rows}</tbody>"
+        "</table>"
+        "</div>"
     )
 
 
@@ -413,15 +435,23 @@ def add_sa3_polygon_visual_fields(rows: list[dict[str, Any]]) -> list[dict[str, 
             row.get("total_record_count"),
             max_record_count=max_record_count,
         )
+        composition = sorted(
+            row.get("composition") or [],
+            key=lambda item: (
+                -int(item.get("record_count") or 0),
+                str(item.get("value") or ""),
+            ),
+        )
         pie_url = pie_svg_data_url(
             build_pie_svg(
-                row.get("composition") or [],
+                composition,
                 color_level=str(color_level or "category"),
             )
         )
         visual_rows.append(
             {
                 **row,
+                "composition": composition,
                 "fill_color": color,
                 "line_color": [17, 24, 39, 150],
                 "tooltip_pie_url": pie_url,
@@ -442,6 +472,7 @@ def sa3_rows_to_geojson_features(rows: list[dict[str, Any]]) -> dict[str, Any]:
             {
                 "type": "Feature",
                 "geometry": geometry,
+                "tooltip_html": row.get("tooltip_html", ""),
                 "properties": properties,
             }
         )
@@ -879,7 +910,7 @@ def render_sa3_dominant_map(rows: list[dict[str, Any]], st: Any, pdk: Any) -> No
         ),
         layers=[layer],
         tooltip={
-            "html": "{properties.tooltip_html}",
+            "html": "{tooltip_html}",
             "style": {
                 "backgroundColor": "rgba(17, 24, 39, 0.96)",
                 "border": "1px solid rgba(255, 255, 255, 0.18)",

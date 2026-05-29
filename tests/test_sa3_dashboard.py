@@ -258,8 +258,48 @@ def test_dashboard_precomputes_sa3_polygon_features_with_record_count_opacity() 
     assert features["type"] == "FeatureCollection"
     assert len(features["features"]) == 2
     assert features["features"][0]["geometry"]["type"] == "Polygon"
+    assert features["features"][0]["tooltip_html"] == visual_rows[0]["tooltip_html"]
     assert features["features"][0]["properties"]["sa3_name_2021"] == "Melbourne City"
     assert features["features"][0]["properties"]["fill_color"] == visual_rows[0]["fill_color"]
+    assert "{properties.tooltip_html}" not in features["features"][0]["tooltip_html"]
+
+
+def test_dashboard_sa3_tooltip_shows_sorted_composition_table_and_pie() -> None:
+    row = {
+        "sa3_name_2021": "Melbourne City",
+        "total_record_count": 100,
+        "color_level": "species",
+        "composition": [
+            {"value": "Butterfly least", "record_count": 5, "share": 0.05},
+            {"value": "Butterfly dominant", "record_count": 70, "share": 0.7},
+            {"value": "Butterfly middle", "record_count": 25, "share": 0.25},
+        ],
+        "composition_text": (
+            "Butterfly dominant: 70 (70.0%)\n"
+            "Butterfly middle: 25 (25.0%)\n"
+            "Butterfly least: 5 (5.0%)"
+        ),
+        "dominant_value": "Butterfly dominant",
+        "dominant_record_count": 70,
+        "dominant_share": 0.7,
+    }
+
+    tooltip_html = dashboard.build_sa3_tooltip_html(
+        row,
+        dashboard.pie_svg_data_url(
+            dashboard.build_pie_svg(row["composition"], color_level="species")
+        ),
+    )
+
+    assert '<img src="data:image/svg+xml;charset=utf-8,' in tooltip_html
+    assert "Total records" in tooltip_html
+    assert "Dominant records" in tooltip_html
+    assert "Composition by species" in tooltip_html
+    assert tooltip_html.index("Butterfly dominant") < tooltip_html.index("Butterfly middle")
+    assert tooltip_html.index("Butterfly middle") < tooltip_html.index("Butterfly least")
+    assert "70.0%" in tooltip_html
+    assert "25.0%" in tooltip_html
+    assert "5.0%" in tooltip_html
 
 
 def test_dashboard_renders_sa3_dominant_map_with_geojson_layer() -> None:
@@ -327,4 +367,5 @@ def test_dashboard_renders_sa3_dominant_map_with_geojson_layer() -> None:
     assert layer.kwargs["get_fill_color"] == "properties.fill_color"
     assert layer.kwargs["get_line_color"] == "properties.line_color"
     assert layer.kwargs["pickable"] is True
+    assert st.deck.kwargs["tooltip"]["html"] == "{tooltip_html}"
     assert st.height == dashboard.MAP_HEIGHT_PX

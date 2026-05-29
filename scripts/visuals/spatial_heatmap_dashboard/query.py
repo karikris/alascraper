@@ -643,53 +643,46 @@ def query_sa3_composition_shapes(
     *,
     limit: int = 500,
     locked_color_dimension: str | None = None,
-    top_n: int = 8,
+    top_n: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return one dominant-composition row per SA3 polygon."""
 
     con = duckdb.connect(":memory:")
     try:
         color_by = color_dimension(filters, locked_color_dimension)
-        top_n = max(int(top_n), 1)
-        result = con.execute(
-            f"""
-            WITH filtered AS (
-                SELECT
-                    sa3_code_2021,
-                    COALESCE(CAST({color_by} AS VARCHAR), 'not supplied')
-                        AS active_color_value,
-                    record_count
-                FROM read_parquet({sql_string(Path(sa3_bins_path).as_posix())})
-                {where_sql(filters)}
-            ),
-            sa3_totals AS (
-                SELECT
-                    sa3_code_2021,
-                    SUM(record_count) AS total_record_count
-                FROM filtered
-                GROUP BY sa3_code_2021
-                ORDER BY total_record_count DESC, sa3_code_2021
-                LIMIT {int(limit)}
-            ),
-            category_counts AS (
-                SELECT
-                    filtered.sa3_code_2021,
-                    filtered.active_color_value AS color_value,
-                    SUM(filtered.record_count) AS category_record_count
-                FROM filtered
-                INNER JOIN sa3_totals USING (sa3_code_2021)
-                GROUP BY filtered.sa3_code_2021, filtered.active_color_value
-            ),
+        if top_n is None:
+            extra_ctes = ""
+            composition_sql = """
+            SELECT
+                boundaries.sa3_code_2021,
+                boundaries.sa3_name_2021,
+                boundaries.geometry_geojson,
+                category_counts.total_record_count,
+                category_counts.color_value,
+                category_counts.category_record_count AS record_count
+            FROM category_counts
+            INNER JOIN read_parquet({boundaries_path}) AS boundaries
+                USING (sa3_code_2021)
+            ORDER BY
+                category_counts.total_record_count DESC,
+                boundaries.sa3_code_2021,
+                category_counts.category_record_count DESC,
+                category_counts.color_value
+            """.format(
+                boundaries_path=sql_string(Path(sa3_boundaries_path).as_posix())
+            )
+        else:
+            top_n = max(int(top_n), 1)
+            extra_ctes = f"""
+            ,
             ranked AS (
                 SELECT
                     category_counts.*,
-                    sa3_totals.total_record_count,
                     ROW_NUMBER() OVER (
                         PARTITION BY category_counts.sa3_code_2021
                         ORDER BY category_record_count DESC, color_value
                     ) AS category_rank
                 FROM category_counts
-                INNER JOIN sa3_totals USING (sa3_code_2021)
             ),
             labeled AS (
                 SELECT
@@ -716,6 +709,8 @@ def query_sa3_composition_shapes(
                 FROM labeled
                 GROUP BY sa3_code_2021, total_record_count, color_value
             )
+            """
+            composition_sql = f"""
             SELECT
                 boundaries.sa3_code_2021,
                 boundaries.sa3_name_2021,
@@ -732,6 +727,39 @@ def query_sa3_composition_shapes(
                 boundaries.sa3_code_2021,
                 collapsed.category_order,
                 collapsed.color_value
+            """
+        result = con.execute(
+            f"""
+            WITH filtered AS (
+                SELECT
+                    sa3_code_2021,
+                    COALESCE(CAST({color_by} AS VARCHAR), 'not supplied')
+                        AS active_color_value,
+                    record_count
+                FROM read_parquet({sql_string(Path(sa3_bins_path).as_posix())})
+                {where_sql(filters)}
+            ),
+            sa3_totals AS (
+                SELECT
+                    sa3_code_2021,
+                    SUM(record_count) AS total_record_count
+                FROM filtered
+                GROUP BY sa3_code_2021
+                ORDER BY total_record_count DESC, sa3_code_2021
+                LIMIT {int(limit)}
+            ),
+            category_counts AS (
+                SELECT
+                    filtered.sa3_code_2021,
+                    filtered.active_color_value AS color_value,
+                    SUM(filtered.record_count) AS category_record_count,
+                    MAX(sa3_totals.total_record_count) AS total_record_count
+                FROM filtered
+                INNER JOIN sa3_totals USING (sa3_code_2021)
+                GROUP BY filtered.sa3_code_2021, filtered.active_color_value
+            )
+            {extra_ctes}
+            {composition_sql}
             """
         )
         rows_by_sa3: dict[str, dict[str, Any]] = {}
